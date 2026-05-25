@@ -3661,8 +3661,8 @@ function MainApp() {
                         })()}
                       </div>
 
-                      {/* 實名資料清單（多筆）*/}
-                      {(b.needRealName || (b.identities && b.identities.length > 0)) && (() => {
+                      {/* 代購清單（永遠顯示,不論是否需要實名）*/}
+                      {(() => {
                         const idCount = (b.identities || []).length;
                         const idQty = (b.identities || []).reduce((s,x)=>s+(x.qty||1),0);
                         const diff = idQty - totalQ;
@@ -3672,7 +3672,7 @@ function MainApp() {
                         <div style={{ marginTop:8,padding:"8px 10px",background:"rgba(255,255,255,.55)",borderRadius:8,border:"1px dashed #d4cdb8" }}>
                           <div style={{ display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:6,flexWrap:"wrap",gap:6 }}>
                             <div style={{ display:"flex",alignItems:"center",gap:6,flexWrap:"wrap" }}>
-                              <span style={{ fontSize:11,fontWeight:700,color:"#7a6850" }}>👥 代購 {idCount} 人 ({idQty} / {totalQ} 張)</span>
+                              <span style={{ fontSize:11,fontWeight:700,color:"#7a6850" }}>👥 代購 {idCount} 人 {idCount > 0 ? `(${idQty} / ${totalQ} 張)` : ""}</span>
                               {idCount > 0 && (
                                 matches
                                   ? <span style={{ fontSize:10,fontWeight:700,padding:"1px 7px",borderRadius:8,background:"#dfeadf",color:"#3a7a3a" }}>✅ 張數相符</span>
