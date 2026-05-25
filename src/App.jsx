@@ -266,6 +266,8 @@ function RealnameFormPage({ token }) {
   const [identities, setIdentities] = useState([]);
   const [saving, setSaving] = useState(false);
   const [savedAt, setSavedAt] = useState(null);
+  // 模式:"buyer" 填 identities; "identity" 填某個 identity 底下的 subItems(細項實名)
+  const [mode, setMode] = useState("buyer");
 
   useEffect(() => { loadByToken(); /* eslint-disable-next-line */ }, [token]);
 
@@ -277,27 +279,51 @@ function RealnameFormPage({ token }) {
       const res = await loadFromSupabase();
       if (!res || !res.payload) throw new Error("無法載入資料");
       const events = res.payload.events || [];
-      let foundEvent = null, foundBuyer = null;
+      let foundEvent = null, foundBuyer = null, foundIdentity = null;
+      // 先找 buyer-level token,再找 identity-level token
       for (const evt of events) {
         for (const b of (evt.buyers || [])) {
           if (b.realnameToken === token) { foundEvent = evt; foundBuyer = b; break; }
+          for (const it of (b.identities || [])) {
+            if (it.realnameToken === token) { foundEvent = evt; foundBuyer = b; foundIdentity = it; break; }
+          }
+          if (foundBuyer) break;
         }
         if (foundBuyer) break;
       }
       if (!foundBuyer) { setError("連結無效或已被刪除"); setLoading(false); return; }
-      // 計算 buyer 總張數
-      const totalQty = (foundBuyer.batches || []).reduce((s, b) => s + (b.qty || 0), 0) || foundBuyer.qty || 1;
-      setEventInfo({ eventName: foundEvent.name, buyerName: foundBuyer.name, totalQty, tixOnly: foundEvent.tixOnly !== false });
-      // 預填現有 identities,沒有的話建 N 個空白
-      const existing = foundBuyer.identities || [];
-      if (existing.length > 0) {
-        setIdentities(existing.map(it => ({ ...it })));
-      } else {
-        const blanks = [];
-        for (let i = 0; i < totalQty; i++) {
-          blanks.push({ id: `tmp_${i}_${Math.random().toString(36).slice(2,6)}`, name:"", phone:"", idNumber:"", tixAccount:"", loginVia:"", locked:false, memberNo:"", qty:1 });
+
+      const tixOnly = foundEvent.tixOnly !== false;
+      if (foundIdentity) {
+        // identity-level token:填細項實名 (subItems)
+        setMode("identity");
+        const totalQty = foundIdentity.qty || 1;
+        setEventInfo({ eventName: foundEvent.name, buyerName: foundBuyer.name, identityName: foundIdentity.name, totalQty, tixOnly });
+        const existing = foundIdentity.subItems || [];
+        if (existing.length > 0) {
+          setIdentities(existing.map(it => ({ ...it })));
+        } else {
+          const blanks = [];
+          for (let i = 0; i < totalQty; i++) {
+            blanks.push({ id: `tmp_${i}_${Math.random().toString(36).slice(2,6)}`, name:"", phone:"", idNumber:"", tixAccount:"", loginVia:"", locked:false, memberNo:"", qty:1 });
+          }
+          setIdentities(blanks);
         }
-        setIdentities(blanks);
+      } else {
+        // buyer-level token (現有行為):填 identities
+        setMode("buyer");
+        const totalQty = (foundBuyer.batches || []).reduce((s, b) => s + (b.qty || 0), 0) || foundBuyer.qty || 1;
+        setEventInfo({ eventName: foundEvent.name, buyerName: foundBuyer.name, totalQty, tixOnly });
+        const existing = foundBuyer.identities || [];
+        if (existing.length > 0) {
+          setIdentities(existing.map(it => ({ ...it })));
+        } else {
+          const blanks = [];
+          for (let i = 0; i < totalQty; i++) {
+            blanks.push({ id: `tmp_${i}_${Math.random().toString(36).slice(2,6)}`, name:"", phone:"", idNumber:"", tixAccount:"", loginVia:"", locked:false, memberNo:"", qty:1 });
+          }
+          setIdentities(blanks);
+        }
       }
     } catch (e) {
       setError("載入失敗: " + (e.message || "未知錯誤"));
@@ -316,7 +342,7 @@ function RealnameFormPage({ token }) {
     setIdentities(prev => prev.length > 1 ? prev.filter((_, i) => i !== idx) : prev);
   };
 
-  // 計算總張數 (識別跟 buyer 訂購的不符會警告)
+  // 計算總張數
   const totalQtySum = identities.reduce((s, it) => s + (parseInt(it.qty)||1), 0);
   const expectedQty = eventInfo?.totalQty || 0;
 
@@ -327,13 +353,7 @@ function RealnameFormPage({ token }) {
       const fresh = await loadFromSupabase();
       if (!fresh || !fresh.payload) throw new Error("無法載入");
       const freshEvents = fresh.payload.events || [];
-      let eIdx = -1, bIdx = -1;
-      for (let i = 0; i < freshEvents.length; i++) {
-        const j = (freshEvents[i].buyers || []).findIndex(b => b.realnameToken === token);
-        if (j >= 0) { eIdx = i; bIdx = j; break; }
-      }
-      if (eIdx < 0) { setError("連結已失效"); setSaving(false); return; }
-      const submittedIdentities = identities.map(it => ({
+      const submitted = identities.map(it => ({
         ...it,
         name: (it.name||"").trim(),
         idNumber: (it.idNumber||"").trim().toUpperCase(),
@@ -342,16 +362,54 @@ function RealnameFormPage({ token }) {
         memberNo: (it.memberNo||"").trim(),
         qty: parseInt(it.qty)||1,
       }));
-      const newEvents = freshEvents.map((evt, i) => {
-        if (i !== eIdx) return evt;
-        return { ...evt, buyers: (evt.buyers||[]).map((b, j) => j !== bIdx ? b : { ...b, identities: submittedIdentities, needRealName: true }) };
-      });
-      const submitLog = {
-        id: `${Date.now()}_${Math.random().toString(36).slice(2,8)}`,
-        time: Date.now(),
-        msg: `📩 「${freshEvents[eIdx].buyers[bIdx].name}」透過實名連結提交 ${submittedIdentities.length} 筆`,
-        snapshot: null,
-      };
+      let newEvents, submitLog;
+      if (mode === "identity") {
+        // 找 (eIdx, bIdx, identityId) 並更新 subItems
+        let eIdx = -1, bIdx = -1, identityId = null;
+        for (let i = 0; i < freshEvents.length; i++) {
+          const bs = freshEvents[i].buyers || [];
+          for (let j = 0; j < bs.length; j++) {
+            const it = (bs[j].identities || []).find(x => x.realnameToken === token);
+            if (it) { eIdx = i; bIdx = j; identityId = it.id; break; }
+          }
+          if (eIdx >= 0) break;
+        }
+        if (eIdx < 0 || !identityId) { setError("連結已失效"); setSaving(false); return; }
+        newEvents = freshEvents.map((evt, i) => {
+          if (i !== eIdx) return evt;
+          return { ...evt, buyers: (evt.buyers||[]).map((b, j) => {
+            if (j !== bIdx) return b;
+            return { ...b, identities: (b.identities || []).map(it => it.id !== identityId ? it : { ...it, subItems: submitted }) };
+          }) };
+        });
+        const evName = freshEvents[eIdx].name;
+        const buyerName = freshEvents[eIdx].buyers[bIdx].name;
+        const identityName = freshEvents[eIdx].buyers[bIdx].identities.find(it => it.id === identityId)?.name || "";
+        submitLog = {
+          id: `${Date.now()}_${Math.random().toString(36).slice(2,8)}`,
+          time: Date.now(),
+          msg: `📩 【${evName}】${buyerName} → ${identityName} 透過實名連結提交 ${submitted.length} 筆細項實名`,
+          snapshot: null,
+        };
+      } else {
+        // buyer mode (現有)
+        let eIdx = -1, bIdx = -1;
+        for (let i = 0; i < freshEvents.length; i++) {
+          const j = (freshEvents[i].buyers || []).findIndex(b => b.realnameToken === token);
+          if (j >= 0) { eIdx = i; bIdx = j; break; }
+        }
+        if (eIdx < 0) { setError("連結已失效"); setSaving(false); return; }
+        newEvents = freshEvents.map((evt, i) => {
+          if (i !== eIdx) return evt;
+          return { ...evt, buyers: (evt.buyers||[]).map((b, j) => j !== bIdx ? b : { ...b, identities: submitted, needRealName: true }) };
+        });
+        submitLog = {
+          id: `${Date.now()}_${Math.random().toString(36).slice(2,8)}`,
+          time: Date.now(),
+          msg: `📩 「${freshEvents[eIdx].buyers[bIdx].name}」透過實名連結提交 ${submitted.length} 筆`,
+          snapshot: null,
+        };
+      }
       const newLogs = [submitLog, ...(fresh.payload.logs || [])].slice(0, 500);
       const newPayload = { ...fresh.payload, events: newEvents, buyerNames: fresh.payload.buyerNames || [], logs: newLogs };
       const result = await saveToSupabase(newPayload, fresh.updatedAt);
@@ -394,10 +452,19 @@ function RealnameFormPage({ token }) {
     <div style={{ minHeight:"100vh",background:"#faf7f0",padding:"20px 14px 60px",fontFamily:"-apple-system, BlinkMacSystemFont, 'PingFang TC', sans-serif" }}>
       <div style={{ maxWidth:480,margin:"0 auto" }}>
         <div style={{ background:"#fff",padding:"18px 18px 14px",borderRadius:12,marginBottom:14,boxShadow:"0 2px 10px rgba(0,0,0,.04)" }}>
-          <div style={{ fontSize:11,color:"#888",letterSpacing:1,marginBottom:4 }}>票券實名制資料填寫</div>
+          <div style={{ fontSize:11,color:"#888",letterSpacing:1,marginBottom:4 }}>{mode === "identity" ? "細項實名資料填寫" : "票券實名制資料填寫"}</div>
           <h1 style={{ margin:"0 0 10px",fontSize:18,fontWeight:700,color:"#2d2a26",lineHeight:1.3 }}>{eventInfo.eventName}</h1>
-          <div style={{ fontSize:13,color:"#666" }}>您好 <b style={{color:"#2d2a26"}}>{eventInfo.buyerName}</b>,共 <b style={{color:"#b8531a"}}>{eventInfo.totalQty}</b> 張票</div>
-          <div style={{ fontSize:11,color:"#888",marginTop:6,lineHeight:1.5 }}>請依下方欄位填寫實名資料,送出後會自動儲存。本連結可重複進入修改。</div>
+          {mode === "identity" ? (
+            <>
+              <div style={{ fontSize:13,color:"#666" }}>您好 <b style={{color:"#2d2a26"}}>{eventInfo.identityName}</b>,您透過 <b style={{color:"#888"}}>{eventInfo.buyerName}</b> 訂了 <b style={{color:"#b8531a"}}>{eventInfo.totalQty}</b> 張票</div>
+              <div style={{ fontSize:11,color:"#888",marginTop:6,lineHeight:1.5 }}>請依下方欄位填寫每位實名人資料(共 {eventInfo.totalQty} 張需要填),送出後會自動儲存。本連結可重複進入修改。</div>
+            </>
+          ) : (
+            <>
+              <div style={{ fontSize:13,color:"#666" }}>您好 <b style={{color:"#2d2a26"}}>{eventInfo.buyerName}</b>,共 <b style={{color:"#b8531a"}}>{eventInfo.totalQty}</b> 張票</div>
+              <div style={{ fontSize:11,color:"#888",marginTop:6,lineHeight:1.5 }}>請依下方欄位填寫實名資料,送出後會自動儲存。本連結可重複進入修改。</div>
+            </>
+          )}
         </div>
 
         {identities.map((it, idx) => (
@@ -517,6 +584,63 @@ ${url}
         <div style={{ background:"#fff9ec",border:"1px solid #e4d4a0",borderRadius:7,padding:"8px 12px",fontSize:11,color:"#7a6028",marginBottom:14,lineHeight:1.6 }}>
           ⚠ 此連結是 <b>{buyer.name}</b> 專屬,請勿傳給其他人<br/>
           ✓ 連結可重複進入修改,訂購人填完資料會自動同步到 app
+        </div>
+
+        <div style={{ display:"flex",justifyContent:"space-between",alignItems:"center",gap:8 }}>
+          <button onClick={onRegenerate} title="作廢舊連結,產一個新的(舊連結會立刻失效)" style={{ padding:"7px 12px",borderRadius:7,border:"1px solid #e0a890",background:"#fff",fontSize:11,cursor:"pointer",fontWeight:600,color:"#8b3a3a",fontFamily:"inherit" }}>🔄 重新產生</button>
+          <button onClick={onClose} style={{ padding:"8px 22px",borderRadius:8,border:"none",background:"#2d2a26",color:"#fff",fontSize:13,cursor:"pointer",fontWeight:700,fontFamily:"inherit" }}>完成</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── 識別人(代購層) 細項實名連結 Modal ───
+function IdentityRealnameLinkModal({ event, buyer, identity, onClose, onRegenerate }) {
+  const [copied, setCopied] = useState(null);
+  const url = typeof window !== "undefined"
+    ? `${window.location.origin}${window.location.pathname}?fill=${identity.realnameToken}`
+    : `?fill=${identity.realnameToken}`;
+  const identityQty = identity.qty || 1;
+  const lineMsg = `Hi ${identity.name||"代購"},您透過 ${buyer.name} 訂的「${event.name}」共 ${identityQty} 張票,請點下方連結填寫實名資料:
+${url}
+
+填寫完即可關閉,資料會自動同步。`;
+
+  const copyText = async (text, key) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(key); setTimeout(()=>setCopied(null), 2000);
+    } catch {
+      const ta = document.createElement("textarea");
+      ta.value = text; document.body.appendChild(ta); ta.select();
+      try { document.execCommand("copy"); setCopied(key); setTimeout(()=>setCopied(null), 2000); } catch {}
+      document.body.removeChild(ta);
+    }
+  };
+
+  return (
+    <div style={{ position:"fixed",inset:0,zIndex:2000,background:"rgba(0,0,0,.4)",backdropFilter:"blur(4px)",display:"flex",alignItems:"center",justifyContent:"center",padding:16 }} onClick={onClose}>
+      <div onClick={e=>e.stopPropagation()} style={{ background:"#fff",borderRadius:14,padding:"20px 22px",width:"100%",maxWidth:520,boxShadow:"0 16px 48px rgba(0,0,0,.2)" }}>
+        <h3 style={{ margin:"0 0 4px",fontSize:16,fontWeight:700 }}>🔗 細項實名連結 — {identity.name||"(未命名)"}</h3>
+        <div style={{ fontSize:12,color:"#888",marginBottom:14 }}>{event.name} · 透過 {buyer.name} · 共 {identityQty} 張</div>
+
+        <div style={{ fontSize:11,color:"#888",marginBottom:4 }}>專屬連結 — 只傳給代購本人 ({identity.name||"未命名"})</div>
+        <div style={{ display:"flex",gap:6,marginBottom:12 }}>
+          <input readOnly value={url} onFocus={e=>e.target.select()} style={{ flex:1,padding:"8px 10px",borderRadius:7,border:"1px solid #d4d0c8",fontSize:11,fontFamily:"ui-monospace, monospace",background:"#faf9f6",color:"#555" }}/>
+          <button onClick={()=>copyText(url, "url")} style={{ padding:"8px 14px",borderRadius:7,border:"none",background:copied==="url"?"#5a7a5a":"#2d2a26",color:"#fff",fontSize:12,cursor:"pointer",fontWeight:600,fontFamily:"inherit",whiteSpace:"nowrap" }}>{copied==="url"?"✓ 已複製":"📋 複製"}</button>
+        </div>
+
+        <div style={{ fontSize:11,color:"#888",marginBottom:4 }}>建議 LINE 訊息(含連結)</div>
+        <div style={{ display:"flex",gap:6,marginBottom:14 }}>
+          <textarea readOnly value={lineMsg} onFocus={e=>e.target.select()} rows={4} style={{ flex:1,padding:"8px 10px",borderRadius:7,border:"1px solid #d4d0c8",fontSize:12,fontFamily:"inherit",background:"#faf9f6",color:"#555",resize:"vertical" }}/>
+          <button onClick={()=>copyText(lineMsg, "msg")} style={{ padding:"8px 14px",borderRadius:7,border:"none",background:copied==="msg"?"#5a7a5a":"#2d2a26",color:"#fff",fontSize:12,cursor:"pointer",fontWeight:600,fontFamily:"inherit",whiteSpace:"nowrap",alignSelf:"flex-start" }}>{copied==="msg"?"✓ 已複製":"📋 複製"}</button>
+        </div>
+
+        <div style={{ background:"#fff9ec",border:"1px solid #e4d4a0",borderRadius:7,padding:"8px 12px",fontSize:11,color:"#7a6028",marginBottom:14,lineHeight:1.6 }}>
+          ⚠ 此連結是 <b>{identity.name||"代購"}</b> 專屬,請勿傳給其他代購<br/>
+          ✓ 代購可填 {identityQty} 筆細項實名(他底下的客人姓名/身分證/電話...),填完自動同步<br/>
+          🔒 此連結只能編輯 {identity.name||"此代購"} 自己的細項,看不到其他代購的資料
         </div>
 
         <div style={{ display:"flex",justifyContent:"space-between",alignItems:"center",gap:8 }}>
@@ -1234,6 +1358,48 @@ function MainApp() {
           return e;
         });
         addLog(`【${evt.name}】重新產生「${b.name}」的實名連結(舊連結作廢)`, snap());
+        setConfirmModal(null);
+      }
+    });
+  };
+
+  // ─── 識別人 (代購層) 的細項實名連結 ───
+  const [identityLinkModal, setIdentityLinkModal] = useState(null); // { eventId, buyerIdx, identityId }
+  const openIdentityRealnameLink = (eventId, buyerIdx, identityId) => {
+    const evt = events.find(e => e.id === eventId);
+    const b = evt?.buyers?.[buyerIdx];
+    const it = b?.identities?.find(x => x.id === identityId);
+    if (!evt || !b || !it) return;
+    if (!it.realnameToken) {
+      const token = generateRealnameToken();
+      updateEvent(eventId, e => {
+        e.buyers[buyerIdx] = {
+          ...e.buyers[buyerIdx],
+          identities: e.buyers[buyerIdx].identities.map(x => x.id === identityId ? { ...x, realnameToken: token } : x),
+        };
+        return e;
+      });
+      addLog(`【${evt.name}】${b.name} → 產生「${it.name||"(未命名)"}」的細項實名連結`, snap());
+    }
+    setIdentityLinkModal({ eventId, buyerIdx, identityId });
+  };
+  const regenerateIdentityRealnameLink = (eventId, buyerIdx, identityId) => {
+    const evt = events.find(e => e.id === eventId);
+    const b = evt?.buyers?.[buyerIdx];
+    const it = b?.identities?.find(x => x.id === identityId);
+    if (!evt || !b || !it) return;
+    setConfirmModal({
+      msg: `確定要重新產生「${it.name||"(未命名)"}」的細項實名連結嗎?\n\n舊連結會立刻失效。`,
+      onYes: () => {
+        const newToken = generateRealnameToken();
+        updateEvent(eventId, e => {
+          e.buyers[buyerIdx] = {
+            ...e.buyers[buyerIdx],
+            identities: e.buyers[buyerIdx].identities.map(x => x.id === identityId ? { ...x, realnameToken: newToken } : x),
+          };
+          return e;
+        });
+        addLog(`【${evt.name}】${b.name} → 重新產生「${it.name||""}」的細項實名連結(舊連結作廢)`, snap());
         setConfirmModal(null);
       }
     });
@@ -3523,7 +3689,8 @@ function MainApp() {
                                   )}
                                   {(evt.tixOnly !== false) && it.locked && <span style={{ fontSize:10,padding:"1px 6px",borderRadius:6,background:"#fce8e8",color:"#8b3a3a",fontWeight:700 }}>🔒 帳號鎖</span>}
                                   {(evt.tixOnly !== false) && it.tixAccount && <span style={{ fontSize:10,color:"#888" }}>· {it.tixAccount}</span>}
-                                  <button onClick={()=>removeIdentity(evt.id,i,it.id)} style={{ marginLeft:"auto",width:22,height:22,borderRadius:5,border:"1px solid #e8c4c4",background:"#fff",cursor:"pointer",fontSize:11,color:"#c47070",fontFamily:"inherit" }} title="刪除">×</button>
+                                  <button onClick={()=>openIdentityRealnameLink(evt.id,i,it.id)} title={`產生「${it.name||"此人"}」的細項實名連結 → LINE 給代購自填`} style={{ marginLeft:"auto",width:22,height:22,borderRadius:5,border:"1px solid #b8d4b8",background:"#e8f0e8",cursor:"pointer",fontSize:11,color:"#4a7a4a",fontFamily:"inherit",display:"flex",alignItems:"center",justifyContent:"center" }}>🔗</button>
+                                  <button onClick={()=>removeIdentity(evt.id,i,it.id)} style={{ width:22,height:22,borderRadius:5,border:"1px solid #e8c4c4",background:"#fff",cursor:"pointer",fontSize:11,color:"#c47070",fontFamily:"inherit" }} title="刪除">×</button>
                                 </div>
                                 {isOpen && (
                                   <>
@@ -4109,6 +4276,7 @@ function MainApp() {
       {buyerExportModal&&<BuyerExportModal buyers={buyerExportModal.buyers} title={buyerExportModal.title} onClose={()=>setBuyerExportModal(null)}/>}
       {importIdentityModal&&(()=>{const e=events.find(x=>x.id===importIdentityModal.eventId);return e?<BatchImportIdentityModal event={e} onClose={()=>setImportIdentityModal(null)} onConfirm={(additions)=>{bulkImportIdentities(e.id,additions);setImportIdentityModal(null);}}/>:null;})()}
       {realnameLinkModal&&(()=>{const e=events.find(x=>x.id===realnameLinkModal.eventId);const b=e?.buyers?.[realnameLinkModal.buyerIdx];return e&&b?<RealnameLinkModal event={e} buyer={b} onClose={()=>setRealnameLinkModal(null)} onRegenerate={()=>regenerateRealnameLink(realnameLinkModal.eventId,realnameLinkModal.buyerIdx)}/>:null;})()}
+      {identityLinkModal&&(()=>{const e=events.find(x=>x.id===identityLinkModal.eventId);const b=e?.buyers?.[identityLinkModal.buyerIdx];const it=b?.identities?.find(x=>x.id===identityLinkModal.identityId);return e&&b&&it?<IdentityRealnameLinkModal event={e} buyer={b} identity={it} onClose={()=>setIdentityLinkModal(null)} onRegenerate={()=>regenerateIdentityRealnameLink(identityLinkModal.eventId,identityLinkModal.buyerIdx,identityLinkModal.identityId)}/>:null;})()}
       {dataDiffModal&&dataDiff&&!dataDiff.noPayload&&<DataDiffModal diff={dataDiff} onClose={()=>setDataDiffModal(null)} onRestore={(key)=>{setConfirmModal({msg:`確定要還原到 ${key} 的快照嗎?\n\n${key} 之後的所有變更都會消失。建議先 💾 匯出備份再操作。`,yesLabel:"確定還原",onYes:()=>{restoreFromDaily(key);setConfirmModal(null);setDataDiffModal(null);}});}}/>}
     </div>
   );
