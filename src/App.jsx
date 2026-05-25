@@ -2436,7 +2436,7 @@ function MainApp() {
     const map = new Map();
     events.forEach(evt => {
       (evt.buyers || []).forEach(b => {
-        if (!map.has(b.name)) map.set(b.name, { name: b.name, orders: [], totalQty: 0, unpaidQty: 0, refundCount: 0, refundedCount: 0, pickedQty: 0 });
+        if (!map.has(b.name)) map.set(b.name, { name: b.name, orders: [], totalQty: 0, unpaidQty: 0, refundCount: 0, refundedCount: 0, pickedQty: 0, supplierTotals: {} });
         const entry = map.get(b.name);
         const bs = getBatches(b);
         entry.orders.push({ eventId: evt.id, eventName: evt.name, eventStatus: evt.status, eventPrice: evt.price, qty: buyerTotalQty(b), batches: bs, note: b.note, addedAt: b.addedAt });
@@ -2446,6 +2446,12 @@ function MainApp() {
           if (x.st === "refund") entry.refundCount += 1;
           if (x.st === "refunded") entry.refundedCount += 1;
           if (x.st === "picked") entry.pickedQty += x.qty;
+          // 累計每個上游的張數
+          const m = (x.detail || "").match(/([^\s·]+?)供/);
+          if (m) {
+            const sup = m[1];
+            entry.supplierTotals[sup] = (entry.supplierTotals[sup] || 0) + (x.qty || 0);
+          }
         });
       });
     });
@@ -3581,6 +3587,24 @@ function MainApp() {
                       <div style={{ display:"flex",alignItems:"center",gap:8,flexWrap:"wrap" }}>
                         <span style={{ fontWeight:700,fontSize:14,minWidth:70,color:scMain.color }}>{b.name}</span>
                         <span style={{ fontSize:13,fontWeight:700,color:"#555" }}>共 {totalQ} 張</span>
+                        {(() => {
+                          // 上游分流:依 batch.detail 抓「X供」分組
+                          const supTotals = {};
+                          batches.forEach(bt => {
+                            const m = (bt.detail || "").match(/([^\s·]+?)供/);
+                            const sup = m ? m[1] : null;
+                            if (sup) supTotals[sup] = (supTotals[sup] || 0) + (bt.qty || 0);
+                          });
+                          const ents = Object.entries(supTotals);
+                          if (ents.length === 0) return null;
+                          return (
+                            <span style={{ fontSize:11,color:"#666",padding:"2px 8px",borderRadius:10,background:"rgba(255,255,255,.7)",border:"1px solid #d8d2c0" }}>
+                              {ents.map(([s,q],j) => (
+                                <span key={s}>{j>0 && <span style={{opacity:.4,margin:"0 3px"}}>·</span>}<span style={{color:"#7a6850"}}>{s}</span> <b style={{color:"#b8531a"}}>{q}</b></span>
+                              ))}
+                            </span>
+                          );
+                        })()}
                         {b.note&&<span style={{ fontSize:11,color:"#999",marginLeft:4 }}>({b.note})</span>}
                         <div style={{ marginLeft:"auto",display:"flex",gap:4 }}>
                           <button onClick={()=>{setAddingBatch({eventId:evt.id,idx:i});setEditingBatch(null);}} title="新增分批（例如一部分已取票、一部分待退費）" style={{ padding:"3px 10px",borderRadius:7,border:"1px solid #c4b89a",background:"#fff9ec",cursor:"pointer",fontSize:11,fontWeight:700,color:"#8b6a2d",fontFamily:"inherit" }}>＋ 分批</button>
@@ -3648,7 +3672,7 @@ function MainApp() {
                         <div style={{ marginTop:8,padding:"8px 10px",background:"rgba(255,255,255,.55)",borderRadius:8,border:"1px dashed #d4cdb8" }}>
                           <div style={{ display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:6,flexWrap:"wrap",gap:6 }}>
                             <div style={{ display:"flex",alignItems:"center",gap:6,flexWrap:"wrap" }}>
-                              <span style={{ fontSize:11,fontWeight:700,color:"#7a6850" }}>📝 實名資料 {idCount} 筆 ({idQty} / {totalQ} 張)</span>
+                              <span style={{ fontSize:11,fontWeight:700,color:"#7a6850" }}>👥 代購 {idCount} 人 ({idQty} / {totalQ} 張)</span>
                               {idCount > 0 && (
                                 matches
                                   ? <span style={{ fontSize:10,fontWeight:700,padding:"1px 7px",borderRadius:8,background:"#dfeadf",color:"#3a7a3a" }}>✅ 張數相符</span>
@@ -3657,10 +3681,10 @@ function MainApp() {
                                     : <span style={{ fontSize:10,fontWeight:700,padding:"1px 7px",borderRadius:8,background:"#f6ecd8",color:"#8b6a2d" }}>多了 {diff} 張</span>
                               )}
                             </div>
-                            <button onClick={()=>addIdentity(evt.id,i)} style={{ padding:"3px 10px",borderRadius:6,border:"1px solid #c4b89a",background:"#fff9ec",cursor:"pointer",fontSize:11,fontWeight:700,color:"#8b6a2d",fontFamily:"inherit" }}>＋ 新增一筆</button>
+                            <button onClick={()=>addIdentity(evt.id,i)} style={{ padding:"3px 10px",borderRadius:6,border:"1px solid #c4b89a",background:"#fff9ec",cursor:"pointer",fontSize:11,fontWeight:700,color:"#8b6a2d",fontFamily:"inherit" }}>＋ 新增代購</button>
                           </div>
                           {(!b.identities || b.identities.length === 0) && (
-                            <div style={{ fontSize:11,color:"#a09080",padding:"4px 2px" }}>還沒有實名資料</div>
+                            <div style={{ fontSize:11,color:"#a09080",padding:"4px 2px" }}>還沒有代購 — 點「＋ 新增代購」加,或用「📥 批次匯入實名」</div>
                           )}
                           {(b.identities||[]).map((it,k) => {
                             const ekey = `${evt.id}_${i}_${it.id}`;
@@ -3682,10 +3706,10 @@ function MainApp() {
                                   {/* 細項實名指示器 */}
                                   {subItems.length > 0 && (
                                     subDiff === 0
-                                      ? <span style={{ fontSize:10,fontWeight:700,padding:"1px 6px",borderRadius:5,background:"#dfeadf",color:"#3a7a3a" }}>📝 子實名 {subQty}/{itQty} ✓</span>
+                                      ? <span style={{ fontSize:10,fontWeight:700,padding:"1px 6px",borderRadius:5,background:"#dfeadf",color:"#3a7a3a" }}>📝 實名 {subQty}/{itQty} ✓</span>
                                       : subDiff > 0
-                                        ? <span style={{ fontSize:10,fontWeight:700,padding:"1px 6px",borderRadius:5,background:"#fce8e8",color:"#8b3a3a" }}>📝 子實名 {subQty}/{itQty} 缺 {subDiff}</span>
-                                        : <span style={{ fontSize:10,fontWeight:700,padding:"1px 6px",borderRadius:5,background:"#f6ecd8",color:"#8b6a2d" }}>📝 子實名 {subQty}/{itQty} 多 {-subDiff}</span>
+                                        ? <span style={{ fontSize:10,fontWeight:700,padding:"1px 6px",borderRadius:5,background:"#fce8e8",color:"#8b3a3a" }}>📝 實名 {subQty}/{itQty} 缺 {subDiff}</span>
+                                        : <span style={{ fontSize:10,fontWeight:700,padding:"1px 6px",borderRadius:5,background:"#f6ecd8",color:"#8b6a2d" }}>📝 實名 {subQty}/{itQty} 多 {-subDiff}</span>
                                   )}
                                   {(evt.tixOnly !== false) && it.locked && <span style={{ fontSize:10,padding:"1px 6px",borderRadius:6,background:"#fce8e8",color:"#8b3a3a",fontWeight:700 }}>🔒 帳號鎖</span>}
                                   {(evt.tixOnly !== false) && it.tixAccount && <span style={{ fontSize:10,color:"#888" }}>· {it.tixAccount}</span>}
@@ -3744,7 +3768,7 @@ function MainApp() {
                                   <div style={{ marginTop:10,padding:"8px 10px",background:"#faf9f6",borderRadius:6,border:"1px dashed #d4cdb8" }}>
                                     <div style={{ display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:6,flexWrap:"wrap",gap:6 }}>
                                       <div style={{ display:"flex",alignItems:"center",gap:6,flexWrap:"wrap" }}>
-                                        <span style={{ fontSize:11,fontWeight:700,color:"#7a6850" }}>👥 {it.name||"此人"} 底下的細項實名 {subItems.length} 筆 ({subQty} / {itQty} 張)</span>
+                                        <span style={{ fontSize:11,fontWeight:700,color:"#7a6850" }}>📝 {it.name||"此代購"} 的實名 {subItems.length} 筆 ({subQty} / {itQty} 張)</span>
                                         {subItems.length > 0 && (
                                           subDiff === 0
                                             ? <span style={{ fontSize:10,fontWeight:700,padding:"1px 7px",borderRadius:8,background:"#dfeadf",color:"#3a7a3a" }}>✅ 張數齊</span>
@@ -3753,10 +3777,10 @@ function MainApp() {
                                               : <span style={{ fontSize:10,fontWeight:700,padding:"1px 7px",borderRadius:8,background:"#f6ecd8",color:"#8b6a2d" }}>多了 {-subDiff} 張</span>
                                         )}
                                       </div>
-                                      <button onClick={()=>addSubItem(evt.id,i,it.id)} style={{ padding:"3px 10px",borderRadius:6,border:"1px solid #c4b89a",background:"#fff9ec",cursor:"pointer",fontSize:11,fontWeight:700,color:"#8b6a2d",fontFamily:"inherit" }}>＋ 新增細項</button>
+                                      <button onClick={()=>addSubItem(evt.id,i,it.id)} style={{ padding:"3px 10px",borderRadius:6,border:"1px solid #c4b89a",background:"#fff9ec",cursor:"pointer",fontSize:11,fontWeight:700,color:"#8b6a2d",fontFamily:"inherit" }}>＋ 新增實名</button>
                                     </div>
                                     {subItems.length === 0 && (
-                                      <div style={{ fontSize:10,color:"#a09080",padding:"2px 2px" }}>還沒有細項實名 — {it.name||"此代購"} 預計給 {itQty} 筆</div>
+                                      <div style={{ fontSize:10,color:"#a09080",padding:"2px 2px" }}>還沒有實名 — {it.name||"此代購"} 預計給 {itQty} 筆,可用 🔗 連結讓 {it.name||"此代購"} 自己填</div>
                                     )}
                                     {subItems.map((si, sik) => {
                                       const sekey = `${ekey}_${si.id}`;
@@ -3963,17 +3987,37 @@ function MainApp() {
         {!showLog&&tab==="buyers"&&(<div style={{ display:"flex",flexDirection:"column",gap:10 }}>
           {(()=>{
             const s=search.toLowerCase();
-            const fb=search?buyersAggregated.filter(b=>b.name.toLowerCase().includes(s)):buyersAggregated;
+            // 搜尋:訂購人名 或 上游名(支援搜「君儀」→ 找出所有有君儀供貨的訂購人)
+            const fb=search?buyersAggregated.filter(b=>
+              b.name.toLowerCase().includes(s) ||
+              Object.keys(b.supplierTotals||{}).some(sup => sup.toLowerCase().includes(s))
+            ):buyersAggregated;
             if(fb.length===0)return <div style={{ textAlign:"center",padding:40,color:"#999" }}>{search?"找不到結果":"目前沒有訂購人"}</div>;
-            return fb.map(buyer=>{
+            // 跨所有訂購人的上游總計 (供搜尋過濾後的小摘要)
+            const grandSup={};
+            fb.forEach(b=>{Object.entries(b.supplierTotals||{}).forEach(([k,v])=>{grandSup[k]=(grandSup[k]||0)+v;});});
+            const grandSupEnts=Object.entries(grandSup).sort((a,b)=>b[1]-a[1]);
+            return (<>
+              {grandSupEnts.length>0&&(
+                <div style={{ background:"#fff9ec",border:"1px solid #e4d4a0",borderRadius:10,padding:"8px 14px",fontSize:12,color:"#7a6028" }}>
+                  📦 上游總計 ({fb.length} 個訂購人):{grandSupEnts.map(([s,q],j)=>(<span key={s}>{j>0&&<span style={{opacity:.4,margin:"0 4px"}}>·</span>}<span style={{color:"#7a6850"}}>{s}</span> <b style={{color:"#b8531a"}}>{q}</b> 張</span>))}
+                </div>
+              )}
+              {fb.map(buyer=>{
               const isExp=expandedId===`buyer-${buyer.name}`;
               const bc=buyer.unpaidQty>0?"#c47070":buyer.refundCount>0?"#c4a040":"#8b7355";
+              const supEnts=Object.entries(buyer.supplierTotals||{}).sort((a,b)=>b[1]-a[1]);
               return (<div key={buyer.name} className="anim-in" style={{ background:"#fff",borderRadius:14,border:"1px solid #e4e0d8",overflow:"hidden",borderLeft:`4px solid ${bc}` }}>
                 <div onClick={()=>setExpandedId(isExp?null:`buyer-${buyer.name}`)} style={{ padding:"14px 18px",cursor:"pointer",display:"flex",justifyContent:"space-between",alignItems:"center" }}>
                   <div style={{ flex:1 }}>
                     <div style={{ display:"flex",alignItems:"center",gap:8,flexWrap:"wrap" }}>
                       <span style={{ fontWeight:700,fontSize:16 }}>{buyer.name}</span>
                       <span style={{ fontSize:12,fontWeight:700,padding:"2px 10px",borderRadius:12,background:"#f0ede8",color:"#8b7355" }}>{buyer.totalQty} 張 · {buyer.orders.length} 場</span>
+                      {supEnts.length>0&&(
+                        <span style={{ fontSize:11,padding:"2px 8px",borderRadius:10,background:"#fffaeb",border:"1px solid #e6d8a0",color:"#7a6028" }}>
+                          {supEnts.map(([s,q],j)=>(<span key={s}>{j>0&&<span style={{opacity:.4,margin:"0 3px"}}>·</span>}<span>{s}</span> <b style={{color:"#b8531a"}}>{q}</b></span>))}
+                        </span>
+                      )}
                       {buyer.unpaidQty>0&&<span style={{ fontSize:11,fontWeight:700,padding:"2px 8px",borderRadius:12,background:"#fce8e8",color:"#8b3a3a" }}>未付款 {buyer.unpaidQty}張</span>}
                       {buyer.refundCount>0&&<span style={{ fontSize:11,fontWeight:700,padding:"2px 8px",borderRadius:12,background:"#f6f0e0",color:"#8b6a2d" }}>待退費 {buyer.refundCount}筆</span>}
                       {buyer.refundedCount>0&&<span style={{ fontSize:11,fontWeight:700,padding:"2px 8px",borderRadius:12,background:"#dfeadf",color:"#4a6b4a" }}>已退款 {buyer.refundedCount}筆</span>}
@@ -4014,8 +4058,9 @@ function MainApp() {
                   </div>
                 </div>)}
               </div>);
-            });
-          })()}
+            })}
+            </>);
+            })()}
         </div>)}
 
         {/* Identity (實名簿) view */}
