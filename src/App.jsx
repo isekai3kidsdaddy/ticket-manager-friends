@@ -685,6 +685,7 @@ const LINE_FIELD_MAP = {
   "登入方式": "loginVia", "登入": "loginVia",
   "拿幾張": "qty", "幾張": "qty", "張數": "qty", "數量": "qty", "票數": "qty",
   "代購": "agent", "識別人": "agent", "上層": "agent", "上層代購": "agent", "屬於": "agent",
+  "來自": "agentSupplier", "來源": "agentSupplier", "上游": "agentSupplier", "由誰提供": "agentSupplier",
 };
 const parseLineBlocks = (rawText) => {
   // 用空行分割多個人,每個 block 內依 「key: value」或「key:value」抓取
@@ -707,6 +708,7 @@ const parseLineBlocks = (rawText) => {
         raw: block.trim(),
         buyer: "", // 訂購人在 LINE 訊息裡通常沒有,由「預設訂購人」補
         agent: (person.agent || "").trim(), // 代購 (identity 層名),若有則此 row 變成 subItem
+        agentSupplier: (person.agentSupplier || "").trim(), // 指定要塞到哪個 supplier 的代購(同名代購有多個時用)
         name: person.name,
         qty: normalizeQtyForImport(person.qty),
         phone: normalizePhoneForImport(person.phone || ""),
@@ -733,7 +735,7 @@ const parseImportRows = (rawText, defaultBuyer = "", defaultAgent = "") => {
   // 否則走原本 TSV 解析
   const lines = String(rawText).split(/\r?\n/).map(l => l.replace(/\s+$/,"")).filter(l => l.trim());
   if (lines.length === 0) return { rows: [], hasHeader: false, format: "tsv" };
-  const HEADER_KEYWORDS = ["訂購人","姓名","電話","手機","身分證","身份證","拿幾張","張數","拓元","登入","鎖","代購","識別人"];
+  const HEADER_KEYWORDS = ["訂購人","姓名","電話","手機","身分證","身份證","拿幾張","張數","拓元","登入","鎖","代購","識別人","來自","來源","上游"];
   const firstCells = lines[0].split("\t");
   const hasHeader = firstCells.some(c => HEADER_KEYWORDS.some(k => c.includes(k)));
   let columnMap, dataLines;
@@ -742,7 +744,8 @@ const parseImportRows = (rawText, defaultBuyer = "", defaultAgent = "") => {
     firstCells.forEach((cell, i) => {
       const c = cell.trim();
       if (c.includes("訂購人")) columnMap.buyer = i;
-      else if (c.includes("代購") || c.includes("識別人") || c.includes("上層")) columnMap.agent = i;
+      else if (c.includes("代購") || c.includes("識別人") || (c.includes("上層") && !c.includes("上游"))) columnMap.agent = i;
+      else if (c.includes("來自") || c.includes("來源") || c.includes("上游")) columnMap.agentSupplier = i;
       else if (c.includes("姓名")) columnMap.name = i;
       else if (c.includes("拿幾張") || c === "張數") columnMap.qty = i;
       else if (c.includes("電話") || c.includes("手機")) columnMap.phone = i;
@@ -761,11 +764,13 @@ const parseImportRows = (rawText, defaultBuyer = "", defaultAgent = "") => {
     const get = (k) => columnMap[k] !== undefined ? (cells[columnMap[k]] || "") : "";
     const rawBuyer = get("buyer").trim();
     const rawAgent = columnMap.agent !== undefined ? get("agent").trim() : "";
+    const rawAgentSup = columnMap.agentSupplier !== undefined ? get("agentSupplier").trim() : "";
     return {
       idx,
       raw: line,
       buyer: rawBuyer || defaultBuyer.trim(),
       agent: rawAgent || defaultAgent.trim(),
+      agentSupplier: rawAgentSup,
       name: get("name").trim(),
       qty: normalizeQtyForImport(get("qty")),
       phone: normalizePhoneForImport(get("phone")),
@@ -875,6 +880,7 @@ function BatchImportIdentityModal({ event, onClose, onConfirm }) {
       additions[buyerKey].push({
         id: `${Date.now()}_${Math.random().toString(36).slice(2,8)}_${r.idx}`,
         agent: (r.agent || "").trim(), // 若非空,此筆變成 agent 識別人底下的 subItem;空則照舊變 identity
+        agentSupplier: (r.agentSupplier || "").trim(), // 若非空,優先塞到對應 supplier 的代購
         name: r.name,
         phone: r.phone,
         idNumber: r.idNumber,
@@ -2720,17 +2726,21 @@ function MainApp() {
   const addIdentity = (eventId, idx) => {
     const evt = events.find(e => e.id === eventId); const b = evt?.buyers?.[idx];
     if (!b) return;
-    addLog(`【${evt.name}】${b.name}:新增一筆實名資料`, snap());
+    addLog(`【${evt.name}】${b.name}:新增一筆代購`, snap());
     updateEvent(eventId, e => {
       const list = Array.isArray(e.buyers[idx].identities) ? [...e.buyers[idx].identities] : [];
-      list.push({ id: `${Date.now()}_${Math.random().toString(36).slice(2,8)}`, name:"", phone:"", idNumber:"", tixAccount:"", loginVia:"", locked:false, memberNo:"", qty:1 });
-      e.buyers[idx] = { ...e.buyers[idx], identities: list, needRealName: true };
+      list.push({ id: `${Date.now()}_${Math.random().toString(36).slice(2,8)}`, name:"", qty:1, subItems: [] });
+      e.buyers[idx] = { ...e.buyers[idx], identities: list }; // 不自動勾「需要實名」— 代購跟實名是獨立概念
       return e;
     });
   };
   // 批次匯入實名:additionsByBuyer = { 訂購人名: [identityOrSubItem, ...] }
-  // 每筆若帶 agent 欄,變成「該 agent 識別人底下的 subItem (細項實名)」
-  // 若不帶 agent,變成識別人(現有行為)
+  // 智慧分配:
+  //   - 帶 agent 欄 → subItem 找對應代購名
+  //     · 同名代購有多筆(不同 supplier) → 依序填,每個填滿就跳下一個
+  //     · 帶 agentSupplier 欄 → 優先填對應 supplier 的代購
+  //   - 不帶 agent → 變成新代購(沒 supplier)
+  //   - ⚠ 不自動勾「需要實名」 — 代購跟實名是獨立概念
   const bulkImportIdentities = (eventId, additionsByBuyer) => {
     const evt = events.find(e => e.id === eventId);
     if (!evt) return { created: 0, addedTo: 0, identities: 0 };
@@ -2755,36 +2765,60 @@ function MainApp() {
         }
         const existing = e.buyers[bIdx].identities || [];
         const updatedIdentities = [...existing];
-        // 分流:有 agent 的去 subItem,沒 agent 的當 identity
+
+        // 分流:有 agent 的去 subItem,沒 agent 的當代購本身
         newRows.forEach(row => {
-          const { agent, ...identityFields } = row;
+          const { agent, agentSupplier, ...identityFields } = row;
           if (agent && agent.trim()) {
-            // 找對應的 identity (按名稱);沒有就建一個空的
             const agentName = agent.trim();
-            let idx = updatedIdentities.findIndex(it => (it.name||"").trim().toLowerCase() === agentName.toLowerCase());
-            if (idx < 0) {
+            const desiredSup = (agentSupplier || "").trim();
+            // 找所有同名代購
+            const candidates = [];
+            updatedIdentities.forEach((it, idx) => {
+              if ((it.name||"").trim().toLowerCase() === agentName.toLowerCase()) candidates.push(idx);
+            });
+            // 1. 若有指定 agentSupplier,先過濾出 supplier 對應的
+            let pickedIdx = -1;
+            if (desiredSup) {
+              for (const i of candidates) {
+                if ((updatedIdentities[i].supplier||"").toLowerCase() === desiredSup.toLowerCase()) {
+                  pickedIdx = i; break;
+                }
+              }
+            }
+            // 2. 否則自動依序找第一個還有空位的代購
+            if (pickedIdx < 0) {
+              const rowQ = identityFields.qty || 1;
+              for (const i of candidates) {
+                const tgt = updatedIdentities[i];
+                const curSub = (tgt.subItems||[]).reduce((s,si)=>s+(si.qty||1),0);
+                const cap = tgt.qty || 1;
+                if (curSub + rowQ <= cap) { pickedIdx = i; break; }
+              }
+              // 3. 全滿就放最後一個(overflow)
+              if (pickedIdx < 0 && candidates.length > 0) pickedIdx = candidates[candidates.length - 1];
+            }
+            // 4. 都沒對應代購就建一個新的
+            if (pickedIdx < 0) {
               updatedIdentities.push({
                 id: `${Date.now()}_${Math.random().toString(36).slice(2,8)}_a`,
                 name: agentName,
-                phone:"", idNumber:"", tixAccount:"", loginVia:"", locked:false, memberNo:"",
+                supplier: desiredSup || "",
                 qty: identityFields.qty || 1,
-                subItems: [],
+                subItems: [identityFields],
               });
-              idx = updatedIdentities.length - 1;
+            } else {
+              const tgt = updatedIdentities[pickedIdx];
+              updatedIdentities[pickedIdx] = { ...tgt, subItems: [...(tgt.subItems||[]), identityFields] };
             }
-            const target = updatedIdentities[idx];
-            updatedIdentities[idx] = {
-              ...target,
-              subItems: [...(target.subItems||[]), identityFields],
-            };
           } else {
-            updatedIdentities.push(identityFields);
+            updatedIdentities.push({ ...identityFields, subItems: [] });
           }
         });
         e.buyers[bIdx] = {
           ...e.buyers[bIdx],
           identities: updatedIdentities,
-          needRealName: true,
+          // ⚠ 不再自動設 needRealName — 代購跟實名獨立
         };
       });
       return e;
@@ -3704,6 +3738,10 @@ function MainApp() {
                                     <span style={{ fontSize:11,fontWeight:700,minWidth:36,textAlign:"center",color:"#666" }}>{itQty} 張</span>
                                     <button onClick={(e)=>{e.stopPropagation();updateIdentity(evt.id,i,it.id,{qty:itQty+1});}} style={{ width:20,height:20,borderRadius:4,border:"1px solid #d4d0c8",background:"#fff",cursor:"pointer",fontSize:11,fontWeight:700,color:"#666",fontFamily:"inherit",lineHeight:1 }}>+</button>
                                   </div>
+                                  {/* 上游 badge — 哪個上游供貨 */}
+                                  {it.supplier && (
+                                    <span style={{ fontSize:10,fontWeight:700,padding:"1px 7px",borderRadius:5,background:"#fffaeb",color:"#7a6028",border:"1px solid #e6d8a0" }}>📦 {it.supplier}</span>
+                                  )}
                                   {/* 細項實名指示器 */}
                                   {subItems.length > 0 && (
                                     subDiff === 0
@@ -3717,6 +3755,32 @@ function MainApp() {
                                 </div>
                                 {isOpen && (
                                   <>
+                                  {/* 代購本身的上游選擇(可選填) */}
+                                  {(() => {
+                                    // 從此場次的所有 buyer batches 抓出現過的上游 (給下拉用)
+                                    const supSet = new Set();
+                                    (evt.buyers || []).forEach(bb => {
+                                      (bb.batches || []).forEach(bt => {
+                                        const m = (bt.detail || "").match(/([^\s·]+?)供/);
+                                        if (m) supSet.add(m[1]);
+                                      });
+                                      (bb.identities || []).forEach(ii => { if (ii.supplier) supSet.add(ii.supplier); });
+                                    });
+                                    if (it.supplier) supSet.add(it.supplier);
+                                    const supOpts = Array.from(supSet).sort((a,b)=>a.localeCompare(b, "zh-TW"));
+                                    if (supOpts.length === 0 && !it.supplier) return null;
+                                    return (
+                                      <div style={{ marginTop:6,display:"flex",alignItems:"center",gap:6,fontSize:11,padding:"4px 6px",background:"#fffaeb",borderRadius:5,border:"1px solid #f0e4b8" }}>
+                                        <span style={{ color:"#7a6028",fontWeight:600 }}>📦 此代購的票來自:</span>
+                                        <select value={it.supplier||""} onChange={e=>updateIdentity(evt.id,i,it.id,{supplier:e.target.value})}
+                                          style={{ padding:"3px 7px",borderRadius:4,border:"1px solid #d4cdb8",fontSize:11,fontFamily:"inherit",background:"#fff" }}>
+                                          <option value="">(未指定)</option>
+                                          {supOpts.map(s => <option key={s} value={s}>{s}</option>)}
+                                        </select>
+                                        <input value={it.supplier||""} onChange={e=>updateIdentity(evt.id,i,it.id,{supplier:e.target.value})} placeholder="或自填上游名" style={{ padding:"3px 7px",borderRadius:4,border:"1px solid #d4cdb8",fontSize:11,fontFamily:"inherit",background:"#fff",width:100 }}/>
+                                      </div>
+                                    );
+                                  })()}
                                   {/* ─── 代購底下的實名清單(端客戶實際資料) ─── */}
                                   <div style={{ marginTop:8,padding:"8px 10px",background:"#faf9f6",borderRadius:6,border:"1px dashed #d4cdb8" }}>
                                     <div style={{ display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:6,flexWrap:"wrap",gap:6 }}>
