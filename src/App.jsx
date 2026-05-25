@@ -560,6 +560,7 @@ const LINE_FIELD_MAP = {
   "拓元帳號": "tixAccount", "拓元": "tixAccount", "帳號": "tixAccount", "Email": "tixAccount", "email": "tixAccount",
   "登入方式": "loginVia", "登入": "loginVia",
   "拿幾張": "qty", "幾張": "qty", "張數": "qty", "數量": "qty", "票數": "qty",
+  "代購": "agent", "識別人": "agent", "上層": "agent", "上層代購": "agent", "屬於": "agent",
 };
 const parseLineBlocks = (rawText) => {
   // 用空行分割多個人,每個 block 內依 「key: value」或「key:value」抓取
@@ -581,6 +582,7 @@ const parseLineBlocks = (rawText) => {
         idx: rows.length,
         raw: block.trim(),
         buyer: "", // 訂購人在 LINE 訊息裡通常沒有,由「預設訂購人」補
+        agent: (person.agent || "").trim(), // 代購 (identity 層名),若有則此 row 變成 subItem
         name: person.name,
         qty: normalizeQtyForImport(person.qty),
         phone: normalizePhoneForImport(person.phone || ""),
@@ -594,20 +596,20 @@ const parseLineBlocks = (rawText) => {
   return rows;
 };
 // 解析貼上內容:自動偵測是「LINE 原文」還是「試算表 TSV」
-const parseImportRows = (rawText, defaultBuyer = "") => {
+const parseImportRows = (rawText, defaultBuyer = "", defaultAgent = "") => {
   if (!rawText || !rawText.trim()) return { rows: [], hasHeader: false, format: "tsv" };
   // 偵測 LINE 格式:文字裡含「姓名:」或「姓名:」就當 LINE 原文解析
   const isLineFormat = /(^|\n)\s*姓名\s*[:：]/.test(rawText);
   if (isLineFormat) {
     const rows = parseLineBlocks(rawText);
-    // 預設訂購人套用到每一列
-    const applied = rows.map(r => ({ ...r, buyer: defaultBuyer.trim() || r.buyer }));
+    // 預設訂購人/代購套用到每一列(已填的不蓋過)
+    const applied = rows.map(r => ({ ...r, buyer: r.buyer || defaultBuyer.trim(), agent: r.agent || defaultAgent.trim() }));
     return { rows: applied, hasHeader: false, format: "line" };
   }
   // 否則走原本 TSV 解析
   const lines = String(rawText).split(/\r?\n/).map(l => l.replace(/\s+$/,"")).filter(l => l.trim());
   if (lines.length === 0) return { rows: [], hasHeader: false, format: "tsv" };
-  const HEADER_KEYWORDS = ["訂購人","姓名","電話","手機","身分證","身份證","拿幾張","張數","拓元","登入","鎖"];
+  const HEADER_KEYWORDS = ["訂購人","姓名","電話","手機","身分證","身份證","拿幾張","張數","拓元","登入","鎖","代購","識別人"];
   const firstCells = lines[0].split("\t");
   const hasHeader = firstCells.some(c => HEADER_KEYWORDS.some(k => c.includes(k)));
   let columnMap, dataLines;
@@ -616,6 +618,7 @@ const parseImportRows = (rawText, defaultBuyer = "") => {
     firstCells.forEach((cell, i) => {
       const c = cell.trim();
       if (c.includes("訂購人")) columnMap.buyer = i;
+      else if (c.includes("代購") || c.includes("識別人") || c.includes("上層")) columnMap.agent = i;
       else if (c.includes("姓名")) columnMap.name = i;
       else if (c.includes("拿幾張") || c === "張數") columnMap.qty = i;
       else if (c.includes("電話") || c.includes("手機")) columnMap.phone = i;
@@ -633,10 +636,12 @@ const parseImportRows = (rawText, defaultBuyer = "") => {
     const cells = line.split("\t");
     const get = (k) => columnMap[k] !== undefined ? (cells[columnMap[k]] || "") : "";
     const rawBuyer = get("buyer").trim();
+    const rawAgent = columnMap.agent !== undefined ? get("agent").trim() : "";
     return {
       idx,
       raw: line,
-      buyer: rawBuyer || defaultBuyer.trim(), // 沒填的話用預設
+      buyer: rawBuyer || defaultBuyer.trim(),
+      agent: rawAgent || defaultAgent.trim(),
       name: get("name").trim(),
       qty: normalizeQtyForImport(get("qty")),
       phone: normalizePhoneForImport(get("phone")),
@@ -657,6 +662,7 @@ function BatchImportIdentityModal({ event, onClose, onConfirm }) {
   const [newBuyerNames, setNewBuyerNames] = useState({}); // rowIdx -> 新訂購人名(顯示輸入框時用)
   const [skipped, setSkipped] = useState({}); // rowIdx -> bool
   const [defaultBuyer, setDefaultBuyer] = useState(""); // 預設訂購人(LINE 原文無訂購人欄時必填)
+  const [defaultAgent, setDefaultAgent] = useState(""); // 預設代購(識別人層) — 若填,匯入時整批變成這個代購底下的「細項實名」
 
   useEffect(() => {
     const h = (e) => { if (e.key === "Escape") onClose(); };
@@ -676,7 +682,7 @@ function BatchImportIdentityModal({ event, onClose, onConfirm }) {
   const modalMaxHeight = `${Math.floor(88 / zoomFactor)}vh`;
 
   const doParse = () => {
-    const result = parseImportRows(rawText, defaultBuyer);
+    const result = parseImportRows(rawText, defaultBuyer, defaultAgent);
     setParsed(result);
     setAssignments({});
     setNewBuyerNames({});
@@ -744,6 +750,7 @@ function BatchImportIdentityModal({ event, onClose, onConfirm }) {
       if (!additions[buyerKey]) additions[buyerKey] = [];
       additions[buyerKey].push({
         id: `${Date.now()}_${Math.random().toString(36).slice(2,8)}_${r.idx}`,
+        agent: (r.agent || "").trim(), // 若非空,此筆變成 agent 識別人底下的 subItem;空則照舊變 identity
         name: r.name,
         phone: r.phone,
         idNumber: r.idNumber,
@@ -766,9 +773,9 @@ function BatchImportIdentityModal({ event, onClose, onConfirm }) {
         </div>
         <div style={{ fontSize:11,color:"#888",marginBottom:8,lineHeight:1.6 }}>
           支援兩種格式 — 自動偵測:<br/>
-          <b style={{color:"#666"}}>📋 試算表 TSV</b>:從 Google Sheet 整批複製;欄位順序「訂購人/姓名/拿幾張/電話/身分證/拓元/登入/鎖」<br/>
-          <b style={{color:"#666"}}>💬 LINE 原文</b>:客人直接傳的「姓名: / 電話: / 身分證:...」格式,多人用空行分隔<br/>
-          智能修補:電話砍 0、登入方式 FB/Google/臉書/谷歌都認得
+          <b style={{color:"#666"}}>📋 試算表 TSV</b>:從 Google Sheet 整批複製;欄位「訂購人/<span style={{color:"#b8531a"}}>代購</span>/姓名/拿幾張/電話/身分證/拓元/登入/鎖」<br/>
+          <b style={{color:"#666"}}>💬 LINE 原文</b>:客人直接傳的「姓名: / 電話: / <span style={{color:"#b8531a"}}>代購:</span> / 身分證:...」,多人空行分隔<br/>
+          智能修補:電話砍 0、登入方式 FB/Google 都認得 · <b style={{color:"#b8531a"}}>「代購」欄填的話 → 該筆變成「細項實名」放在識別人底下</b>
         </div>
         <div style={{ background:"#f7f3ec",borderRadius:7,padding:"6px 10px",fontSize:11,marginBottom:8,color:"#7a6850" }}>
           此場目前訂購人 ({buyerNamesList.length}):{buyerNamesList.length>0?buyerNamesList.join(", "):"(無)"}
@@ -776,12 +783,17 @@ function BatchImportIdentityModal({ event, onClose, onConfirm }) {
 
         {!parsed ? (
           <>
-            <div style={{ display:"flex",alignItems:"center",gap:8,marginBottom:8 }}>
+            <div style={{ display:"flex",alignItems:"center",gap:8,marginBottom:6,flexWrap:"wrap" }}>
               <span style={{ fontSize:11,color:"#888",whiteSpace:"nowrap" }}>預設訂購人:</span>
-              <input value={defaultBuyer} onChange={e=>setDefaultBuyer(e.target.value)} placeholder="LINE 原文沒帶訂購人 → 整批套用這個名字(如「阿文」)" style={{ flex:1,padding:"6px 10px",borderRadius:6,border:"1px solid #c4b89a",background:"#fffdf5",fontSize:12,fontFamily:"inherit",color:"#5a4a2a" }} list="batch-import-buyer-list"/>
+              <input value={defaultBuyer} onChange={e=>setDefaultBuyer(e.target.value)} placeholder="整批套用這個訂購人(如「妙」)" style={{ flex:1,minWidth:140,padding:"6px 10px",borderRadius:6,border:"1px solid #c4b89a",background:"#fffdf5",fontSize:12,fontFamily:"inherit",color:"#5a4a2a" }} list="batch-import-buyer-list"/>
               <datalist id="batch-import-buyer-list">
                 {buyerNamesList.map(n => <option key={n} value={n}/>)}
               </datalist>
+            </div>
+            <div style={{ display:"flex",alignItems:"center",gap:8,marginBottom:8,flexWrap:"wrap" }}>
+              <span style={{ fontSize:11,color:"#888",whiteSpace:"nowrap" }}>預設代購:</span>
+              <input value={defaultAgent} onChange={e=>setDefaultAgent(e.target.value)} placeholder="(選填)整批變成 XX 識別人底下的細項實名(如「萬陽」)" style={{ flex:1,minWidth:140,padding:"6px 10px",borderRadius:6,border:"1px solid #c4b89a",background:"#fffdf5",fontSize:12,fontFamily:"inherit",color:"#5a4a2a" }}/>
+              <span style={{ fontSize:10,color:"#aaa" }} title="不填 = 每筆變成識別人;填了 = 每筆變成這個識別人底下的細項實名">ⓘ</span>
             </div>
             <textarea value={rawText} onChange={e=>setRawText(e.target.value)} placeholder="貼 Google Sheet 整批 row,或直接貼 LINE 訊息 (姓名: / 電話: / 身分證:... 多人用空行分隔)" style={{ flex:1,minHeight:220,padding:"10px 12px",borderRadius:8,border:"1px solid #d4d0c8",fontSize:12,fontFamily:"ui-monospace, monospace",background:"#faf9f6",resize:"vertical",lineHeight:1.5 }}/>
             <div style={{ display:"flex",gap:8,marginTop:12,justifyContent:"flex-end" }}>
@@ -821,6 +833,7 @@ function BatchImportIdentityModal({ event, onClose, onConfirm }) {
                       <span style={{ fontSize:13,fontWeight:700,minWidth:80 }}>
                         {r.matched ? r.matched.name : (r.willCreateNewBuyer ? `${r.targetBuyerName} ✨新` : (r.buyer || "(無)"))}
                       </span>
+                      {r.agent && <span style={{ fontSize:11,color:"#b8531a",fontWeight:700,padding:"1px 6px",background:"#fff5ea",borderRadius:5 }}>↳ {r.agent}</span>}
                       <span style={{ fontSize:12,color:"#888" }}>→</span>
                       <span style={{ fontSize:12,color:"#444" }}>
                         {r.name||<span style={{color:"#c47070"}}>(缺姓名)</span>}
@@ -2543,21 +2556,22 @@ function MainApp() {
       return e;
     });
   };
-  // 批次匯入實名:additionsByBuyer = { 訂購人名: [identity, ...] }
-  // 找不到的訂購人會自動新增,找到的會把實名 append 到該 buyer 的 identities
+  // 批次匯入實名:additionsByBuyer = { 訂購人名: [identityOrSubItem, ...] }
+  // 每筆若帶 agent 欄,變成「該 agent 識別人底下的 subItem (細項實名)」
+  // 若不帶 agent,變成識別人(現有行為)
   const bulkImportIdentities = (eventId, additionsByBuyer) => {
     const evt = events.find(e => e.id === eventId);
     if (!evt) return { created: 0, addedTo: 0, identities: 0 };
-    const totalIdentities = Object.values(additionsByBuyer).reduce((s, arr) => s + arr.length, 0);
+    const totalRows = Object.values(additionsByBuyer).reduce((s, arr) => s + arr.length, 0);
     const buyerNamesCount = Object.keys(additionsByBuyer).length;
-    addLog(`📥 批次匯入 ${totalIdentities} 筆實名到【${evt.name}】(${buyerNamesCount} 個訂購人)`, snap());
+    addLog(`📥 批次匯入 ${totalRows} 筆實名到【${evt.name}】(${buyerNamesCount} 個訂購人)`, snap());
     updateEvent(eventId, e => {
-      Object.entries(additionsByBuyer).forEach(([buyerName, newIds]) => {
-        if (!newIds || newIds.length === 0) return;
+      Object.entries(additionsByBuyer).forEach(([buyerName, newRows]) => {
+        if (!newRows || newRows.length === 0) return;
         let bIdx = e.buyers.findIndex(b => (b.name||"").trim().toLowerCase() === buyerName.trim().toLowerCase());
         if (bIdx < 0) {
-          // 新增訂購人,張數預設等於這次匯入的實名總張數
-          const totalQ = newIds.reduce((s, n) => s + (n.qty||1), 0);
+          // 新增訂購人,張數預設等於這次匯入的總張數
+          const totalQ = newRows.reduce((s, n) => s + (n.qty||1), 0);
           e.buyers.push({
             name: buyerName,
             qty: totalQ,
@@ -2568,9 +2582,36 @@ function MainApp() {
           bIdx = e.buyers.length - 1;
         }
         const existing = e.buyers[bIdx].identities || [];
+        const updatedIdentities = [...existing];
+        // 分流:有 agent 的去 subItem,沒 agent 的當 identity
+        newRows.forEach(row => {
+          const { agent, ...identityFields } = row;
+          if (agent && agent.trim()) {
+            // 找對應的 identity (按名稱);沒有就建一個空的
+            const agentName = agent.trim();
+            let idx = updatedIdentities.findIndex(it => (it.name||"").trim().toLowerCase() === agentName.toLowerCase());
+            if (idx < 0) {
+              updatedIdentities.push({
+                id: `${Date.now()}_${Math.random().toString(36).slice(2,8)}_a`,
+                name: agentName,
+                phone:"", idNumber:"", tixAccount:"", loginVia:"", locked:false, memberNo:"",
+                qty: identityFields.qty || 1,
+                subItems: [],
+              });
+              idx = updatedIdentities.length - 1;
+            }
+            const target = updatedIdentities[idx];
+            updatedIdentities[idx] = {
+              ...target,
+              subItems: [...(target.subItems||[]), identityFields],
+            };
+          } else {
+            updatedIdentities.push(identityFields);
+          }
+        });
         e.buyers[bIdx] = {
           ...e.buyers[bIdx],
-          identities: [...existing, ...newIds],
+          identities: updatedIdentities,
           needRealName: true,
         };
       });
