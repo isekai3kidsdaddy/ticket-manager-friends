@@ -1172,6 +1172,7 @@ function MainApp() {
   const [events, setEvents] = useState(() => { try { const s = window.localStorage?.getItem?.("tkm-v3"); if (s) return JSON.parse(s); } catch {} return INITIAL_EVENTS; });
   const [buyerNames, setBuyerNames] = useState(() => { try { const s = window.localStorage?.getItem?.("tkm-v3-names"); if (s) return JSON.parse(s); } catch {} return KNOWN_BUYERS; });
   const [tab, setTab] = useState("active");
+  const [orderLogSupplierFilter, setOrderLogSupplierFilter] = useState("all"); // "all" | supplier name
   const [search, setSearch] = useState("");
   const [expandedId, setExpandedId] = useState(null);
   const [showAddEvent, setShowAddEvent] = useState(false);
@@ -2408,9 +2409,14 @@ function MainApp() {
           if (isNaN(d.getTime())) return;
           const dateKey = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
           if (!byDate.has(dateKey)) byDate.set(dateKey, []);
+          // 從 detail 抓上游名字 (例:「君儀姐供」/「待退費 · 佩盈姐供」)
+          let supplier = "";
+          const supMatch = (bt.detail || "").match(/([^\s·]+?)供/);
+          if (supMatch) supplier = supMatch[1];
           byDate.get(dateKey).push({
             source: "buyer",
             eventName: evt.name, eventId: evt.id, eventStatus: evt.status,
+            supplier,
             buyerName: b.name, buyerIdx: bi, batchIdx: bti,
             qty: bt.qty, st: bt.st, detail: bt.detail || "", ts
           });
@@ -3732,23 +3738,41 @@ function MainApp() {
               <div style={{ fontSize:11 }}>每次新增訂購人 / 分批時,系統會記錄訂購日期到這裡</div>
             </div>
           ):(<>
+            {/* 上游切換 + 摘要 */}
             {(() => {
-              const totalSup = orderLogData.reduce((s,d)=>s+d.supplierQty,0);
-              const totalBuy = orderLogData.reduce((s,d)=>s+d.buyerQty,0);
+              // 收集所有有出現過的上游名稱
+              const supplierSet = new Set();
+              orderLogData.forEach(g => g.items.forEach(it => { if (it.supplier) supplierSet.add(it.supplier); }));
+              const allSuppliers = Array.from(supplierSet).sort((a, b) => a.localeCompare(b, "zh-TW"));
+              // 計算當前 filter 下的統計
+              const passesFilter = (it) => orderLogSupplierFilter === "all" || it.supplier === orderLogSupplierFilter;
+              const filteredGroups = orderLogData.map(g => {
+                const filtered = g.items.filter(passesFilter);
+                return { ...g, items: filtered, totalQty: filtered.reduce((s,x)=>s+x.qty,0), supplierQty: filtered.filter(x=>x.source==="supplier").reduce((s,x)=>s+x.qty,0), buyerQty: filtered.filter(x=>x.source==="buyer").reduce((s,x)=>s+x.qty,0) };
+              }).filter(g => g.items.length > 0);
+              const totalSup = filteredGroups.reduce((s,d)=>s+d.supplierQty,0);
+              const totalBuy = filteredGroups.reduce((s,d)=>s+d.buyerQty,0);
               return (
-                <div style={{ background:"#fff9ec",border:"1px solid #e4d4a0",borderRadius:10,padding:"10px 14px",fontSize:12,color:"#7a6028" }}>
-                  📊 共 <b>{orderLogData.length}</b> 個訂購日 · 
-                  {totalSup>0 && <> <span style={{color:"#4a7a4a"}}>📦 上游進貨 <b>{totalSup}</b> 張</span> · </>}
-                  {totalBuy>0 && <span style={{color:"#b8531a"}}>👥 買家異動 <b>{totalBuy}</b> 張</span>}
-                </div>
-              );
-            })()}
-            {orderLogData.map(group => {
+                <>
+                  {allSuppliers.length > 0 && (
+                    <div style={{ background:"#fff",borderRadius:10,padding:"10px 12px",display:"flex",gap:6,flexWrap:"wrap",alignItems:"center" }}>
+                      <span style={{ fontSize:11,color:"#888",marginRight:4 }}>上游:</span>
+                      {[{key:"all",label:"全部"}, ...allSuppliers.map(s => ({key:s, label:s}))].map(opt => (
+                        <button key={opt.key} onClick={()=>setOrderLogSupplierFilter(opt.key)} style={{ padding:"5px 12px",borderRadius:7,border:"none",fontSize:12,cursor:"pointer",fontFamily:"inherit",fontWeight:700,background:orderLogSupplierFilter===opt.key?"#b8531a":"#f7f3ec",color:orderLogSupplierFilter===opt.key?"#fff":"#666" }}>{opt.label}</button>
+                      ))}
+                    </div>
+                  )}
+                  <div style={{ background:"#fff9ec",border:"1px solid #e4d4a0",borderRadius:10,padding:"10px 14px",fontSize:12,color:"#7a6028" }}>
+                    📊 共 <b>{filteredGroups.length}</b> 個訂購日 · 
+                    {totalSup>0 && <> <span style={{color:"#4a7a4a"}}>📦 上游進貨 <b>{totalSup}</b> 張</span> · </>}
+                    {totalBuy>0 && <span style={{color:"#b8531a"}}>👥 買家異動 <b>{totalBuy}</b> 張</span>}
+                    {orderLogSupplierFilter !== "all" && <span style={{ marginLeft:8,fontSize:10,color:"#aa7030" }}>(只看 {orderLogSupplierFilter})</span>}
+                  </div>
+                  {filteredGroups.map(group => {
               const d = new Date(group.date + "T00:00:00");
               const weekday = ["日","一","二","三","四","五","六"][d.getDay()];
               const monthDay = `${d.getMonth()+1}/${d.getDate()}`;
               const year = d.getFullYear();
-              // 按場次再分組,同場次同日合併
               const byEvent = new Map();
               group.items.forEach(it => {
                 if (!byEvent.has(it.eventName)) byEvent.set(it.eventName, { eventName: it.eventName, eventId: it.eventId, eventStatus: it.eventStatus, supplierItems: [], buyerItems: [], qty: 0 });
@@ -3804,6 +3828,9 @@ function MainApp() {
                 </div>
               );
             })}
+                </>
+              );
+            })()}
           </>)}
         </div>)}
 
