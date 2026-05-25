@@ -3697,7 +3697,8 @@ function MainApp() {
                               <div key={it.id} style={{ marginTop:k>0?6:0,padding:"6px 8px",background:"#fff",borderRadius:6,border:"1px solid #e4e0d8" }}>
                                 <div style={{ display:"flex",alignItems:"center",gap:6,flexWrap:"wrap" }}>
                                   <button onClick={()=>setExpandedIdentity(isOpen?null:ekey)} style={{ background:"none",border:"none",cursor:"pointer",fontSize:11,color:"#999",padding:"0 4px",fontFamily:"inherit" }}>{isOpen?"▾":"▸"}</button>
-                                  <span style={{ fontSize:12,fontWeight:700,color:it.name?"#2d2a26":"#bbb" }}>{it.name || "(未填姓名)"}</span>
+                                  <input value={it.name||""} onChange={e=>updateIdentity(evt.id,i,it.id,{name:e.target.value})} placeholder="代購姓名"
+                                    style={{ padding:"3px 8px",borderRadius:5,border:"1px solid #e4e0d8",fontSize:12,fontFamily:"inherit",fontWeight:700,color:"#2d2a26",background:"#fff",width:100 }}/>
                                   <div style={{ display:"flex",alignItems:"center",gap:2 }}>
                                     <button onClick={(e)=>{e.stopPropagation();if(itQty>1)updateIdentity(evt.id,i,it.id,{qty:itQty-1});}} style={{ width:20,height:20,borderRadius:4,border:"1px solid #d4d0c8",background:"#fff",cursor:"pointer",fontSize:11,fontWeight:700,color:"#666",fontFamily:"inherit",lineHeight:1 }}>−</button>
                                     <span style={{ fontSize:11,fontWeight:700,minWidth:36,textAlign:"center",color:"#666" }}>{itQty} 張</span>
@@ -3711,61 +3712,13 @@ function MainApp() {
                                         ? <span style={{ fontSize:10,fontWeight:700,padding:"1px 6px",borderRadius:5,background:"#fce8e8",color:"#8b3a3a" }}>📝 實名 {subQty}/{itQty} 缺 {subDiff}</span>
                                         : <span style={{ fontSize:10,fontWeight:700,padding:"1px 6px",borderRadius:5,background:"#f6ecd8",color:"#8b6a2d" }}>📝 實名 {subQty}/{itQty} 多 {-subDiff}</span>
                                   )}
-                                  {(evt.tixOnly !== false) && it.locked && <span style={{ fontSize:10,padding:"1px 6px",borderRadius:6,background:"#fce8e8",color:"#8b3a3a",fontWeight:700 }}>🔒 帳號鎖</span>}
-                                  {(evt.tixOnly !== false) && it.tixAccount && <span style={{ fontSize:10,color:"#888" }}>· {it.tixAccount}</span>}
                                   <button onClick={()=>openIdentityRealnameLink(evt.id,i,it.id)} title={`產生「${it.name||"此人"}」的細項實名連結 → LINE 給代購自填`} style={{ marginLeft:"auto",width:22,height:22,borderRadius:5,border:"1px solid #b8d4b8",background:"#e8f0e8",cursor:"pointer",fontSize:11,color:"#4a7a4a",fontFamily:"inherit",display:"flex",alignItems:"center",justifyContent:"center" }}>🔗</button>
                                   <button onClick={()=>removeIdentity(evt.id,i,it.id)} style={{ width:22,height:22,borderRadius:5,border:"1px solid #e8c4c4",background:"#fff",cursor:"pointer",fontSize:11,color:"#c47070",fontFamily:"inherit" }} title="刪除">×</button>
                                 </div>
                                 {isOpen && (
                                   <>
-                                  <div style={{ marginTop:6,display:"grid",gridTemplateColumns:"repeat(auto-fit, minmax(140px, 1fr))",gap:6 }}>
-                                    <IdentityNameAutocomplete
-                                      identity={it}
-                                      history={identityHistory}
-                                      isTix={evt.tixOnly !== false}
-                                      onFill={updates=>updateIdentity(evt.id,i,it.id,updates)}
-                                    />
-                                    {/* 通用欄位:不分系統都需要 */}
-                                    {[
-                                      { key:"phone", label:"電話", ph:"09xx..." },
-                                      { key:"idNumber", label:"身分證", ph:"A123..." },
-                                      { key:"memberNo", label:"會員編號", ph:"" },
-                                    ].map(field => (
-                                      <label key={field.key} style={{ display:"flex",flexDirection:"column",gap:2,fontSize:10,color:"#888" }}>
-                                        <span style={{ fontWeight:600 }}>{field.label}</span>
-                                        <input value={it[field.key]||""} onChange={e=>updateIdentity(evt.id,i,it.id,{[field.key]:e.target.value})} placeholder={field.ph}
-                                          style={{ padding:"5px 7px",borderRadius:5,border:"1px solid #d4d0c8",fontSize:12,fontFamily:"inherit",background:"#faf9f6" }}/>
-                                      </label>
-                                    ))}
-                                    {/* 拓元專屬欄位:只有 evt.tixOnly !== false 時顯示 */}
-                                    {(evt.tixOnly !== false) && (
-                                      <label style={{ display:"flex",flexDirection:"column",gap:2,fontSize:10,color:"#888" }}>
-                                        <span style={{ fontWeight:600 }}>拓元帳號</span>
-                                        <input value={it.tixAccount||""} onChange={e=>updateIdentity(evt.id,i,it.id,{tixAccount:e.target.value})} placeholder="帳號 / Email"
-                                          style={{ padding:"5px 7px",borderRadius:5,border:"1px solid #d4d0c8",fontSize:12,fontFamily:"inherit",background:"#faf9f6" }}/>
-                                      </label>
-                                    )}
-                                    {(evt.tixOnly !== false) && (
-                                      <label style={{ display:"flex",flexDirection:"column",gap:2,fontSize:10,color:"#888" }}>
-                                        <span style={{ fontWeight:600 }}>登入方式</span>
-                                        <select value={it.loginVia||""} onChange={e=>updateIdentity(evt.id,i,it.id,{loginVia:e.target.value})}
-                                          style={{ padding:"5px 7px",borderRadius:5,border:"1px solid #d4d0c8",fontSize:12,fontFamily:"inherit",background:"#faf9f6" }}>
-                                          <option value="">未選</option>
-                                          <option value="facebook">Facebook</option>
-                                          <option value="google">Google</option>
-                                        </select>
-                                      </label>
-                                    )}
-                                    {(evt.tixOnly !== false) && (
-                                      <label style={{ display:"flex",alignItems:"center",gap:5,fontSize:11,color:"#666",cursor:"pointer",alignSelf:"end",padding:"5px 0" }}>
-                                        <input type="checkbox" checked={!!it.locked} onChange={e=>updateIdentity(evt.id,i,it.id,{locked:e.target.checked})} style={{ cursor:"pointer",margin:0 }}/>
-                                        <span style={{ fontWeight:600 }}>🔒 拓元帳號被鎖</span>
-                                      </label>
-                                    )}
-                                  </div>
-
-                                  {/* ─── 細項實名 (4 層階層): 識別人底下的真實實名人 ─── */}
-                                  <div style={{ marginTop:10,padding:"8px 10px",background:"#faf9f6",borderRadius:6,border:"1px dashed #d4cdb8" }}>
+                                  {/* ─── 代購底下的實名清單(端客戶實際資料) ─── */}
+                                  <div style={{ marginTop:8,padding:"8px 10px",background:"#faf9f6",borderRadius:6,border:"1px dashed #d4cdb8" }}>
                                     <div style={{ display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:6,flexWrap:"wrap",gap:6 }}>
                                       <div style={{ display:"flex",alignItems:"center",gap:6,flexWrap:"wrap" }}>
                                         <span style={{ fontSize:11,fontWeight:700,color:"#7a6850" }}>📝 {it.name||"此代購"} 的實名 {subItems.length} 筆 ({subQty} / {itQty} 張)</span>
