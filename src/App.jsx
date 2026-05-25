@@ -2375,21 +2375,41 @@ function MainApp() {
     }));
   };
 
-  // Order log data: 把所有 batch 依「訂購日期」分組,給「📅 訂購日曆」分頁用
-  // 日期來源優先順序:1) batch.addedAt (新建的批次) 2) buyer.addedAt (舊資料 fallback)
+  // Order log data: 把所有 batch (買家批次 + 上游進貨批次) 依「訂購日期」分組,給「📅 訂購日曆」分頁用
+  // 來源:
+  //   1) 上游進貨 (event.supplierBatches) — 從 Excel 匯入,供應商何時送票來
+  //   2) 買家批次 (buyer.batches[].addedAt) — 客戶何時下單/分批
   const orderLogData = useMemo(() => {
-    const byDate = new Map(); // dateKey -> [{eventName, eventId, eventStatus, buyerName, buyerIdx, qty, st, detail, ts}]
+    const byDate = new Map();
     (events || []).forEach(evt => {
+      // 上游進貨批次
+      (evt.supplierBatches || []).forEach((sb, sbi) => {
+        const ts = sb.addedAt || (sb.date ? new Date(sb.date + "T00:00:00").getTime() : null);
+        if (!ts) return;
+        const d = new Date(ts);
+        if (isNaN(d.getTime())) return;
+        const dateKey = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+        if (!byDate.has(dateKey)) byDate.set(dateKey, []);
+        byDate.get(dateKey).push({
+          source: "supplier",
+          eventName: evt.name, eventId: evt.id, eventStatus: evt.status,
+          supplier: sb.supplier || "",
+          buyerName: sb.supplier || "上游", buyerIdx: -1, batchIdx: sbi,
+          qty: sb.qty, st: sb.st || "normal", detail: "上游進貨", ts,
+        });
+      });
+      // 買家批次
       (evt.buyers || []).forEach((b, bi) => {
         const batches = getBatches(b);
         batches.forEach((bt, bti) => {
           const ts = bt.addedAt || b.addedAt || null;
-          if (!ts) return; // 沒時間戳就跳過 (避免錯誤分組)
+          if (!ts) return;
           const d = new Date(ts);
           if (isNaN(d.getTime())) return;
           const dateKey = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
           if (!byDate.has(dateKey)) byDate.set(dateKey, []);
           byDate.get(dateKey).push({
+            source: "buyer",
             eventName: evt.name, eventId: evt.id, eventStatus: evt.status,
             buyerName: b.name, buyerIdx: bi, batchIdx: bti,
             qty: bt.qty, st: bt.st, detail: bt.detail || "", ts
@@ -2404,6 +2424,8 @@ function MainApp() {
         date,
         items: items.sort((a, b) => b.ts - a.ts),
         totalQty: items.reduce((s, x) => s + (x.qty || 0), 0),
+        supplierQty: items.filter(x => x.source === "supplier").reduce((s, x) => s + (x.qty || 0), 0),
+        buyerQty: items.filter(x => x.source === "buyer").reduce((s, x) => s + (x.qty || 0), 0),
       }));
   }, [events]);
 
@@ -3710,10 +3732,17 @@ function MainApp() {
               <div style={{ fontSize:11 }}>每次新增訂購人 / 分批時,系統會記錄訂購日期到這裡</div>
             </div>
           ):(<>
-            {/* 摘要 */}
-            <div style={{ background:"#fff9ec",border:"1px solid #e4d4a0",borderRadius:10,padding:"10px 14px",fontSize:12,color:"#7a6028" }}>
-              📊 共 <b>{orderLogData.length}</b> 個訂購日 · 總 <b>{orderLogData.reduce((s,d)=>s+d.totalQty,0)}</b> 張 · <b>{orderLogData.reduce((s,d)=>s+d.items.length,0)}</b> 筆訂購
-            </div>
+            {(() => {
+              const totalSup = orderLogData.reduce((s,d)=>s+d.supplierQty,0);
+              const totalBuy = orderLogData.reduce((s,d)=>s+d.buyerQty,0);
+              return (
+                <div style={{ background:"#fff9ec",border:"1px solid #e4d4a0",borderRadius:10,padding:"10px 14px",fontSize:12,color:"#7a6028" }}>
+                  📊 共 <b>{orderLogData.length}</b> 個訂購日 · 
+                  {totalSup>0 && <> <span style={{color:"#4a7a4a"}}>📦 上游進貨 <b>{totalSup}</b> 張</span> · </>}
+                  {totalBuy>0 && <span style={{color:"#b8531a"}}>👥 買家異動 <b>{totalBuy}</b> 張</span>}
+                </div>
+              );
+            })()}
             {orderLogData.map(group => {
               const d = new Date(group.date + "T00:00:00");
               const weekday = ["日","一","二","三","四","五","六"][d.getDay()];
@@ -3722,9 +3751,10 @@ function MainApp() {
               // 按場次再分組,同場次同日合併
               const byEvent = new Map();
               group.items.forEach(it => {
-                if (!byEvent.has(it.eventName)) byEvent.set(it.eventName, { eventName: it.eventName, eventId: it.eventId, eventStatus: it.eventStatus, buyers: [], qty: 0 });
+                if (!byEvent.has(it.eventName)) byEvent.set(it.eventName, { eventName: it.eventName, eventId: it.eventId, eventStatus: it.eventStatus, supplierItems: [], buyerItems: [], qty: 0 });
                 const ev = byEvent.get(it.eventName);
-                ev.buyers.push(it);
+                if (it.source === "supplier") ev.supplierItems.push(it);
+                else ev.buyerItems.push(it);
                 ev.qty += it.qty;
               });
               const eventGroups = Array.from(byEvent.values()).sort((a,b)=>b.qty-a.qty);
@@ -3735,20 +3765,39 @@ function MainApp() {
                       <span style={{ fontSize:18,fontWeight:800,color:"#2d2a26" }}>{monthDay}</span>
                       <span style={{ fontSize:11,color:"#888",marginLeft:8 }}>{year} · 週{weekday}</span>
                     </div>
-                    <div style={{ fontSize:13,color:"#b8531a",fontWeight:700 }}>{group.totalQty} 張</div>
+                    <div style={{ fontSize:12,fontWeight:700 }}>
+                      {group.supplierQty>0 && <span style={{color:"#4a7a4a",marginRight:8}}>📦 {group.supplierQty}</span>}
+                      {group.buyerQty>0 && <span style={{color:"#b8531a"}}>👥 {group.buyerQty}</span>}
+                    </div>
                   </div>
-                  <div style={{ display:"flex",flexDirection:"column",gap:6 }}>
+                  <div style={{ display:"flex",flexDirection:"column",gap:8 }}>
                     {eventGroups.map((eg, ei) => (
-                      <div key={ei} style={{ display:"flex",alignItems:"baseline",gap:8,padding:"4px 0",fontSize:12 }}>
-                        <button onClick={()=>jumpToEvent(eg.eventId, eg.eventStatus)} style={{ padding:"2px 8px",borderRadius:5,border:"1px solid #d4d0c8",background:"#faf9f6",fontSize:11,cursor:"pointer",fontFamily:"inherit",color:"#5a5046",fontWeight:600,minWidth:0,maxWidth:160,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap" }} title={eg.eventName}>{eg.eventName}</button>
-                        <span style={{ flex:1,color:"#666" }}>
-                          {eg.buyers.map((b, bi) => (
-                            <span key={bi} style={{ marginRight:8 }}>
-                              {b.buyerName} <b style={{color:"#b8531a"}}>{b.qty}</b>
-                              {b.st!=="normal" && <span style={{ marginLeft:3,padding:"0 4px",borderRadius:3,background:BUYER_STATUS[b.st]?.bg||"#eee",color:BUYER_STATUS[b.st]?.color||"#999",fontSize:9,fontWeight:700 }}>{BUYER_STATUS[b.st]?.icon||""}</span>}
-                            </span>
-                          ))}
-                        </span>
+                      <div key={ei} style={{ padding:"4px 0",fontSize:12 }}>
+                        <div style={{ display:"flex",alignItems:"baseline",gap:8,marginBottom:eg.supplierItems.length||eg.buyerItems.length?4:0 }}>
+                          <button onClick={()=>jumpToEvent(eg.eventId, eg.eventStatus)} style={{ padding:"2px 8px",borderRadius:5,border:"1px solid #d4d0c8",background:"#faf9f6",fontSize:11,cursor:"pointer",fontFamily:"inherit",color:"#5a5046",fontWeight:600,minWidth:0,maxWidth:200,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap" }} title={eg.eventName}>{eg.eventName}</button>
+                          <span style={{ color:"#b8531a",fontWeight:700,fontSize:11 }}>{eg.qty} 張</span>
+                        </div>
+                        {eg.supplierItems.length>0 && (
+                          <div style={{ paddingLeft:10,fontSize:11,color:"#4a7a4a",marginTop:2 }}>
+                            <span style={{ fontSize:10,opacity:.7,marginRight:4 }}>📦 上游</span>
+                            {eg.supplierItems.map((b, bi) => (
+                              <span key={bi} style={{ marginRight:8 }}>
+                                {b.supplier||"上游"} <b>{b.qty}</b>
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                        {eg.buyerItems.length>0 && (
+                          <div style={{ paddingLeft:10,fontSize:11,color:"#666",marginTop:2 }}>
+                            <span style={{ fontSize:10,opacity:.7,marginRight:4 }}>👥 買家</span>
+                            {eg.buyerItems.map((b, bi) => (
+                              <span key={bi} style={{ marginRight:8 }}>
+                                {b.buyerName} <b style={{color:"#b8531a"}}>{b.qty}</b>
+                                {b.st!=="normal" && <span style={{ marginLeft:3,padding:"0 4px",borderRadius:3,background:BUYER_STATUS[b.st]?.bg||"#eee",color:BUYER_STATUS[b.st]?.color||"#999",fontSize:9,fontWeight:700 }}>{BUYER_STATUS[b.st]?.icon||""}</span>}
+                              </span>
+                            ))}
+                          </div>
+                        )}
                       </div>
                     ))}
                   </div>
