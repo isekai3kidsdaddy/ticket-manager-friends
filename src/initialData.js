@@ -6,3 +6,5 @@ export const KNOWN_BUYERS = [];
 
 // ─── Initial data from Excel ───
 export const INITIAL_EVENTS = [];
+export const APP_TITLE = "窗口小幫手";
+export const APP_SUBTITLE = "WINDOW HELPER";  // 副標題,可改成你想要的英文,或留空("")
