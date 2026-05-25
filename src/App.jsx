@@ -1233,6 +1233,7 @@ function MainApp() {
   const [addingBatch, setAddingBatch] = useState(null);  // {eventId, idx}
   const [editingBatch, setEditingBatch] = useState(null); // {eventId, idx, bi}
   const [expandedIdentity, setExpandedIdentity] = useState(null); // identity key
+  const [expandedSubItem, setExpandedSubItem] = useState(null); // subItem key
   const [editingCatalogKey, setEditingCatalogKey] = useState(null); // 實名簿正在編輯的 key
   const [timelineFilter, setTimelineFilter] = useState(null); // null = 全部, 否則為 kind 名稱
   const fileInputRef = useRef(null);
@@ -2598,6 +2599,53 @@ function MainApp() {
     } });
   };
 
+  // ─── 細項實名(SubItems): 識別人底下再一層,給「上游」角色用 ───
+  // 範例:妙(buyer,90張) → 萬陽(identity, 48張) → 萬陽底下的 48 個真實實名人(subItems)
+  const addSubItem = (eventId, idx, identityId) => {
+    const evt = events.find(e => e.id === eventId); const b = evt?.buyers?.[idx];
+    if (!b) return;
+    const it = (b.identities || []).find(x => x.id === identityId);
+    addLog(`【${evt.name}】${b.name} → ${it?.name || ""}:新增細項實名`, snap());
+    updateEvent(eventId, e => {
+      const list = (e.buyers[idx].identities || []).map(it => {
+        if (it.id !== identityId) return it;
+        const subs = Array.isArray(it.subItems) ? [...it.subItems] : [];
+        subs.push({ id: `${Date.now()}_${Math.random().toString(36).slice(2,8)}`, name:"", phone:"", idNumber:"", tixAccount:"", loginVia:"", locked:false, memberNo:"", qty:1 });
+        return { ...it, subItems: subs };
+      });
+      e.buyers[idx] = { ...e.buyers[idx], identities: list };
+      return e;
+    });
+  };
+  const updateSubItem = (eventId, idx, identityId, subId, updates) => {
+    updateEvent(eventId, e => {
+      const list = (e.buyers[idx].identities || []).map(it => {
+        if (it.id !== identityId) return it;
+        const subs = (it.subItems || []).map(si => si.id === subId ? { ...si, ...updates } : si);
+        return { ...it, subItems: subs };
+      });
+      e.buyers[idx] = { ...e.buyers[idx], identities: list };
+      return e;
+    });
+  };
+  const removeSubItem = (eventId, idx, identityId, subId) => {
+    const evt = events.find(e => e.id === eventId); const b = evt?.buyers?.[idx];
+    if (!b) return;
+    const it = (b.identities || []).find(x => x.id === identityId);
+    const si = (it?.subItems || []).find(x => x.id === subId);
+    addLog(`【${evt.name}】${b.name} → ${it?.name || ""}:移除細項實名 ${si?.name || ""}`, snap());
+    updateEvent(eventId, e => {
+      const list = (e.buyers[idx].identities || []).map(it => {
+        if (it.id !== identityId) return it;
+        return { ...it, subItems: (it.subItems || []).filter(si => si.id !== subId) };
+      });
+      e.buyers[idx] = { ...e.buyers[idx], identities: list };
+      return e;
+    });
+  };
+  // helper:某 identity 已收的細項實名總張數
+  const getSubItemQty = (it) => (it?.subItems || []).reduce((s, si) => s + (parseInt(si.qty) || 1), 0);
+
   const migrateBuyer = (b) => {
     if (Array.isArray(b.batches) && b.batches.length > 0) return b;
     const batches = getBatches(b);
@@ -3411,6 +3459,9 @@ function MainApp() {
                             const ekey = `${evt.id}_${i}_${it.id}`;
                             const isOpen = expandedIdentity === ekey;
                             const itQty = it.qty || 1;
+                            const subItems = it.subItems || [];
+                            const subQty = getSubItemQty(it);
+                            const subDiff = itQty - subQty;
                             return (
                               <div key={it.id} style={{ marginTop:k>0?6:0,padding:"6px 8px",background:"#fff",borderRadius:6,border:"1px solid #e4e0d8" }}>
                                 <div style={{ display:"flex",alignItems:"center",gap:6,flexWrap:"wrap" }}>
@@ -3421,11 +3472,20 @@ function MainApp() {
                                     <span style={{ fontSize:11,fontWeight:700,minWidth:36,textAlign:"center",color:"#666" }}>{itQty} 張</span>
                                     <button onClick={(e)=>{e.stopPropagation();updateIdentity(evt.id,i,it.id,{qty:itQty+1});}} style={{ width:20,height:20,borderRadius:4,border:"1px solid #d4d0c8",background:"#fff",cursor:"pointer",fontSize:11,fontWeight:700,color:"#666",fontFamily:"inherit",lineHeight:1 }}>+</button>
                                   </div>
+                                  {/* 細項實名指示器 */}
+                                  {subItems.length > 0 && (
+                                    subDiff === 0
+                                      ? <span style={{ fontSize:10,fontWeight:700,padding:"1px 6px",borderRadius:5,background:"#dfeadf",color:"#3a7a3a" }}>📝 子實名 {subQty}/{itQty} ✓</span>
+                                      : subDiff > 0
+                                        ? <span style={{ fontSize:10,fontWeight:700,padding:"1px 6px",borderRadius:5,background:"#fce8e8",color:"#8b3a3a" }}>📝 子實名 {subQty}/{itQty} 缺 {subDiff}</span>
+                                        : <span style={{ fontSize:10,fontWeight:700,padding:"1px 6px",borderRadius:5,background:"#f6ecd8",color:"#8b6a2d" }}>📝 子實名 {subQty}/{itQty} 多 {-subDiff}</span>
+                                  )}
                                   {(evt.tixOnly !== false) && it.locked && <span style={{ fontSize:10,padding:"1px 6px",borderRadius:6,background:"#fce8e8",color:"#8b3a3a",fontWeight:700 }}>🔒 帳號鎖</span>}
                                   {(evt.tixOnly !== false) && it.tixAccount && <span style={{ fontSize:10,color:"#888" }}>· {it.tixAccount}</span>}
                                   <button onClick={()=>removeIdentity(evt.id,i,it.id)} style={{ marginLeft:"auto",width:22,height:22,borderRadius:5,border:"1px solid #e8c4c4",background:"#fff",cursor:"pointer",fontSize:11,color:"#c47070",fontFamily:"inherit" }} title="刪除">×</button>
                                 </div>
                                 {isOpen && (
+                                  <>
                                   <div style={{ marginTop:6,display:"grid",gridTemplateColumns:"repeat(auto-fit, minmax(140px, 1fr))",gap:6 }}>
                                     <IdentityNameAutocomplete
                                       identity={it}
@@ -3471,6 +3531,88 @@ function MainApp() {
                                       </label>
                                     )}
                                   </div>
+
+                                  {/* ─── 細項實名 (4 層階層): 識別人底下的真實實名人 ─── */}
+                                  <div style={{ marginTop:10,padding:"8px 10px",background:"#faf9f6",borderRadius:6,border:"1px dashed #d4cdb8" }}>
+                                    <div style={{ display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:6,flexWrap:"wrap",gap:6 }}>
+                                      <div style={{ display:"flex",alignItems:"center",gap:6,flexWrap:"wrap" }}>
+                                        <span style={{ fontSize:11,fontWeight:700,color:"#7a6850" }}>👥 {it.name||"此人"} 底下的細項實名 {subItems.length} 筆 ({subQty} / {itQty} 張)</span>
+                                        {subItems.length > 0 && (
+                                          subDiff === 0
+                                            ? <span style={{ fontSize:10,fontWeight:700,padding:"1px 7px",borderRadius:8,background:"#dfeadf",color:"#3a7a3a" }}>✅ 張數齊</span>
+                                            : subDiff > 0
+                                              ? <span style={{ fontSize:10,fontWeight:700,padding:"1px 7px",borderRadius:8,background:"#fce8e8",color:"#8b3a3a" }}>⚠ 還差 {subDiff} 筆</span>
+                                              : <span style={{ fontSize:10,fontWeight:700,padding:"1px 7px",borderRadius:8,background:"#f6ecd8",color:"#8b6a2d" }}>多了 {-subDiff} 張</span>
+                                        )}
+                                      </div>
+                                      <button onClick={()=>addSubItem(evt.id,i,it.id)} style={{ padding:"3px 10px",borderRadius:6,border:"1px solid #c4b89a",background:"#fff9ec",cursor:"pointer",fontSize:11,fontWeight:700,color:"#8b6a2d",fontFamily:"inherit" }}>＋ 新增細項</button>
+                                    </div>
+                                    {subItems.length === 0 && (
+                                      <div style={{ fontSize:10,color:"#a09080",padding:"2px 2px" }}>還沒有細項實名 — {it.name||"此代購"} 預計給 {itQty} 筆</div>
+                                    )}
+                                    {subItems.map((si, sik) => {
+                                      const sekey = `${ekey}_${si.id}`;
+                                      const siOpen = expandedSubItem === sekey;
+                                      const siQty = si.qty || 1;
+                                      return (
+                                        <div key={si.id} style={{ marginTop:sik>0?5:0,padding:"5px 7px",background:"#fff",borderRadius:5,border:"1px solid #e8e3d4" }}>
+                                          <div style={{ display:"flex",alignItems:"center",gap:5,flexWrap:"wrap" }}>
+                                            <button onClick={()=>setExpandedSubItem(siOpen?null:sekey)} style={{ background:"none",border:"none",cursor:"pointer",fontSize:10,color:"#999",padding:"0 3px",fontFamily:"inherit" }}>{siOpen?"▾":"▸"}</button>
+                                            <input value={si.name||""} onChange={e=>updateSubItem(evt.id,i,it.id,si.id,{name:e.target.value})} placeholder="姓名"
+                                              style={{ padding:"3px 6px",borderRadius:4,border:"1px solid #d4d0c8",fontSize:11,fontFamily:"inherit",background:"#fff",width:90 }}/>
+                                            <div style={{ display:"flex",alignItems:"center",gap:1 }}>
+                                              <button onClick={()=>{if(siQty>1)updateSubItem(evt.id,i,it.id,si.id,{qty:siQty-1});}} style={{ width:18,height:18,borderRadius:3,border:"1px solid #d4d0c8",background:"#fff",cursor:"pointer",fontSize:10,fontWeight:700,color:"#666",fontFamily:"inherit",lineHeight:1 }}>−</button>
+                                              <span style={{ fontSize:10,fontWeight:700,minWidth:30,textAlign:"center",color:"#666" }}>{siQty}張</span>
+                                              <button onClick={()=>updateSubItem(evt.id,i,it.id,si.id,{qty:siQty+1})} style={{ width:18,height:18,borderRadius:3,border:"1px solid #d4d0c8",background:"#fff",cursor:"pointer",fontSize:10,fontWeight:700,color:"#666",fontFamily:"inherit",lineHeight:1 }}>+</button>
+                                            </div>
+                                            {!siOpen && si.idNumber && <span style={{ fontSize:10,color:"#888" }}>· {si.idNumber}</span>}
+                                            {!siOpen && si.phone && <span style={{ fontSize:10,color:"#888" }}>· {si.phone}</span>}
+                                            <button onClick={()=>removeSubItem(evt.id,i,it.id,si.id)} style={{ marginLeft:"auto",width:20,height:20,borderRadius:4,border:"1px solid #e8c4c4",background:"#fff",cursor:"pointer",fontSize:10,color:"#c47070",fontFamily:"inherit" }} title="刪除">×</button>
+                                          </div>
+                                          {siOpen && (
+                                            <div style={{ marginTop:5,display:"grid",gridTemplateColumns:"repeat(auto-fit, minmax(130px, 1fr))",gap:5 }}>
+                                              {[
+                                                { key:"phone", label:"電話", ph:"09xx..." },
+                                                { key:"idNumber", label:"身分證", ph:"A123..." },
+                                                { key:"memberNo", label:"會員編號", ph:"" },
+                                              ].map(field => (
+                                                <label key={field.key} style={{ display:"flex",flexDirection:"column",gap:2,fontSize:9,color:"#888" }}>
+                                                  <span style={{ fontWeight:600 }}>{field.label}</span>
+                                                  <input value={si[field.key]||""} onChange={e=>updateSubItem(evt.id,i,it.id,si.id,{[field.key]:e.target.value})} placeholder={field.ph}
+                                                    style={{ padding:"4px 6px",borderRadius:4,border:"1px solid #d4d0c8",fontSize:11,fontFamily:"inherit",background:"#faf9f6" }}/>
+                                                </label>
+                                              ))}
+                                              {(evt.tixOnly !== false) && (
+                                                <label style={{ display:"flex",flexDirection:"column",gap:2,fontSize:9,color:"#888" }}>
+                                                  <span style={{ fontWeight:600 }}>拓元帳號</span>
+                                                  <input value={si.tixAccount||""} onChange={e=>updateSubItem(evt.id,i,it.id,si.id,{tixAccount:e.target.value})} placeholder="帳號/Email"
+                                                    style={{ padding:"4px 6px",borderRadius:4,border:"1px solid #d4d0c8",fontSize:11,fontFamily:"inherit",background:"#faf9f6" }}/>
+                                                </label>
+                                              )}
+                                              {(evt.tixOnly !== false) && (
+                                                <label style={{ display:"flex",flexDirection:"column",gap:2,fontSize:9,color:"#888" }}>
+                                                  <span style={{ fontWeight:600 }}>登入方式</span>
+                                                  <select value={si.loginVia||""} onChange={e=>updateSubItem(evt.id,i,it.id,si.id,{loginVia:e.target.value})}
+                                                    style={{ padding:"4px 6px",borderRadius:4,border:"1px solid #d4d0c8",fontSize:11,fontFamily:"inherit",background:"#faf9f6" }}>
+                                                    <option value="">未選</option>
+                                                    <option value="facebook">Facebook</option>
+                                                    <option value="google">Google</option>
+                                                  </select>
+                                                </label>
+                                              )}
+                                              {(evt.tixOnly !== false) && (
+                                                <label style={{ display:"flex",alignItems:"center",gap:4,fontSize:10,color:"#666",cursor:"pointer",alignSelf:"end",padding:"4px 0" }}>
+                                                  <input type="checkbox" checked={!!si.locked} onChange={e=>updateSubItem(evt.id,i,it.id,si.id,{locked:e.target.checked})} style={{ cursor:"pointer",margin:0 }}/>
+                                                  <span style={{ fontWeight:600 }}>🔒 帳號鎖</span>
+                                                </label>
+                                              )}
+                                            </div>
+                                          )}
+                                        </div>
+                                      );
+                                    })}
+                                  </div>
+                                  </>
                                 )}
                               </div>
                             );
