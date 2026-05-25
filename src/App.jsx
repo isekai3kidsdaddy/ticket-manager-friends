@@ -1314,6 +1314,20 @@ function IdentityExportModal({ events, title, onClose }) {
 function MainApp() {
   const [events, setEvents] = useState(() => { try { const s = window.localStorage?.getItem?.("tkm-v3"); if (s) return JSON.parse(s); } catch {} return INITIAL_EVENTS; });
   const [buyerNames, setBuyerNames] = useState(() => { try { const s = window.localStorage?.getItem?.("tkm-v3-names"); if (s) return JSON.parse(s); } catch {} return KNOWN_BUYERS; });
+
+  // 自動偵測「4 層 mode」— 若資料中任一識別人有 subItems / realnameToken / supplier → 啟用上游/代購完整 UI
+  // 否則回到簡單版面(3 層:Event → Buyer → Identity 作為實名人)
+  const is4LayerMode = useMemo(() => {
+    return (events || []).some(evt =>
+      (evt.buyers || []).some(b =>
+        (b.identities || []).some(it =>
+          (Array.isArray(it.subItems) && it.subItems.length > 0) ||
+          (it.realnameToken && it.realnameToken.length > 0) ||
+          (it.supplier && it.supplier.length > 0)
+        )
+      )
+    );
+  }, [events]);
   const [tab, setTab] = useState("active");
   const [orderLogSupplierFilter, setOrderLogSupplierFilter] = useState("all"); // "all" | supplier name
   const [search, setSearch] = useState("");
@@ -3738,26 +3752,27 @@ function MainApp() {
                                     <span style={{ fontSize:11,fontWeight:700,minWidth:36,textAlign:"center",color:"#666" }}>{itQty} 張</span>
                                     <button onClick={(e)=>{e.stopPropagation();updateIdentity(evt.id,i,it.id,{qty:itQty+1});}} style={{ width:20,height:20,borderRadius:4,border:"1px solid #d4d0c8",background:"#fff",cursor:"pointer",fontSize:11,fontWeight:700,color:"#666",fontFamily:"inherit",lineHeight:1 }}>+</button>
                                   </div>
-                                  {/* 上游 badge — 哪個上游供貨 */}
-                                  {it.supplier && (
+                                  {/* 上游 badge — 哪個上游供貨 (僅 4 層 mode) */}
+                                  {is4LayerMode && it.supplier && (
                                     <span style={{ fontSize:10,fontWeight:700,padding:"1px 7px",borderRadius:5,background:"#fffaeb",color:"#7a6028",border:"1px solid #e6d8a0" }}>📦 {it.supplier}</span>
                                   )}
-                                  {/* 細項實名指示器 */}
-                                  {subItems.length > 0 && (
+                                  {/* 細項實名指示器 (僅 4 層 mode 顯示) */}
+                                  {is4LayerMode && subItems.length > 0 && (
                                     subDiff === 0
                                       ? <span style={{ fontSize:10,fontWeight:700,padding:"1px 6px",borderRadius:5,background:"#dfeadf",color:"#3a7a3a" }}>📝 實名 {subQty}/{itQty} ✓</span>
                                       : subDiff > 0
                                         ? <span style={{ fontSize:10,fontWeight:700,padding:"1px 6px",borderRadius:5,background:"#fce8e8",color:"#8b3a3a" }}>📝 實名 {subQty}/{itQty} 缺 {subDiff}</span>
                                         : <span style={{ fontSize:10,fontWeight:700,padding:"1px 6px",borderRadius:5,background:"#f6ecd8",color:"#8b6a2d" }}>📝 實名 {subQty}/{itQty} 多 {-subDiff}</span>
                                   )}
-                                  <button onClick={()=>openIdentityRealnameLink(evt.id,i,it.id)} title={`產生「${it.name||"此人"}」的細項實名連結 → LINE 給代購自填`} style={{ marginLeft:"auto",width:22,height:22,borderRadius:5,border:"1px solid #b8d4b8",background:"#e8f0e8",cursor:"pointer",fontSize:11,color:"#4a7a4a",fontFamily:"inherit",display:"flex",alignItems:"center",justifyContent:"center" }}>🔗</button>
-                                  <button onClick={()=>removeIdentity(evt.id,i,it.id)} style={{ width:22,height:22,borderRadius:5,border:"1px solid #e8c4c4",background:"#fff",cursor:"pointer",fontSize:11,color:"#c47070",fontFamily:"inherit" }} title="刪除">×</button>
+                                  {is4LayerMode && (
+                                    <button onClick={()=>openIdentityRealnameLink(evt.id,i,it.id)} title={`產生「${it.name||"此人"}」的細項實名連結 → LINE 給代購自填`} style={{ marginLeft:"auto",width:22,height:22,borderRadius:5,border:"1px solid #b8d4b8",background:"#e8f0e8",cursor:"pointer",fontSize:11,color:"#4a7a4a",fontFamily:"inherit",display:"flex",alignItems:"center",justifyContent:"center" }}>🔗</button>
+                                  )}
+                                  <button onClick={()=>removeIdentity(evt.id,i,it.id)} style={{ marginLeft: is4LayerMode ? 0 : "auto",width:22,height:22,borderRadius:5,border:"1px solid #e8c4c4",background:"#fff",cursor:"pointer",fontSize:11,color:"#c47070",fontFamily:"inherit" }} title="刪除">×</button>
                                 </div>
-                                {isOpen && (
+                                {isOpen && is4LayerMode && (
                                   <>
-                                  {/* 代購本身的上游選擇(可選填) */}
+                                  {/* 代購本身的上游選擇(可選填) — 僅 4 層 mode */}
                                   {(() => {
-                                    // 從此場次的所有 buyer batches 抓出現過的上游 (給下拉用)
                                     const supSet = new Set();
                                     (evt.buyers || []).forEach(bb => {
                                       (bb.batches || []).forEach(bt => {
@@ -3781,7 +3796,7 @@ function MainApp() {
                                       </div>
                                     );
                                   })()}
-                                  {/* ─── 代購底下的實名清單(端客戶實際資料) ─── */}
+                                  {/* ─── 代購底下的實名清單(端客戶實際資料) — 僅 4 層 mode ─── */}
                                   <div style={{ marginTop:8,padding:"8px 10px",background:"#faf9f6",borderRadius:6,border:"1px dashed #d4cdb8" }}>
                                     <div style={{ display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:6,flexWrap:"wrap",gap:6 }}>
                                       <div style={{ display:"flex",alignItems:"center",gap:6,flexWrap:"wrap" }}>
@@ -3862,6 +3877,45 @@ function MainApp() {
                                     })}
                                   </div>
                                   </>
+                                )}
+                                {isOpen && !is4LayerMode && (
+                                  <div style={{ marginTop:6,display:"grid",gridTemplateColumns:"repeat(auto-fit, minmax(140px, 1fr))",gap:6 }}>
+                                    {[
+                                      { key:"phone", label:"電話", ph:"09xx..." },
+                                      { key:"idNumber", label:"身分證", ph:"A123..." },
+                                      { key:"memberNo", label:"會員編號", ph:"" },
+                                    ].map(field => (
+                                      <label key={field.key} style={{ display:"flex",flexDirection:"column",gap:2,fontSize:10,color:"#888" }}>
+                                        <span style={{ fontWeight:600 }}>{field.label}</span>
+                                        <input value={it[field.key]||""} onChange={e=>updateIdentity(evt.id,i,it.id,{[field.key]:e.target.value})} placeholder={field.ph}
+                                          style={{ padding:"5px 7px",borderRadius:5,border:"1px solid #d4d0c8",fontSize:12,fontFamily:"inherit",background:"#faf9f6" }}/>
+                                      </label>
+                                    ))}
+                                    {(evt.tixOnly !== false) && (
+                                      <label style={{ display:"flex",flexDirection:"column",gap:2,fontSize:10,color:"#888" }}>
+                                        <span style={{ fontWeight:600 }}>拓元帳號</span>
+                                        <input value={it.tixAccount||""} onChange={e=>updateIdentity(evt.id,i,it.id,{tixAccount:e.target.value})} placeholder="帳號 / Email"
+                                          style={{ padding:"5px 7px",borderRadius:5,border:"1px solid #d4d0c8",fontSize:12,fontFamily:"inherit",background:"#faf9f6" }}/>
+                                      </label>
+                                    )}
+                                    {(evt.tixOnly !== false) && (
+                                      <label style={{ display:"flex",flexDirection:"column",gap:2,fontSize:10,color:"#888" }}>
+                                        <span style={{ fontWeight:600 }}>登入方式</span>
+                                        <select value={it.loginVia||""} onChange={e=>updateIdentity(evt.id,i,it.id,{loginVia:e.target.value})}
+                                          style={{ padding:"5px 7px",borderRadius:5,border:"1px solid #d4d0c8",fontSize:12,fontFamily:"inherit",background:"#faf9f6" }}>
+                                          <option value="">未選</option>
+                                          <option value="facebook">Facebook</option>
+                                          <option value="google">Google</option>
+                                        </select>
+                                      </label>
+                                    )}
+                                    {(evt.tixOnly !== false) && (
+                                      <label style={{ display:"flex",alignItems:"center",gap:5,fontSize:11,color:"#666",cursor:"pointer",alignSelf:"end",padding:"5px 0" }}>
+                                        <input type="checkbox" checked={!!it.locked} onChange={e=>updateIdentity(evt.id,i,it.id,{locked:e.target.checked})} style={{ cursor:"pointer",margin:0 }}/>
+                                        <span style={{ fontWeight:600 }}>🔒 拓元帳號被鎖</span>
+                                      </label>
+                                    )}
+                                  </div>
                                 )}
                               </div>
                             );
