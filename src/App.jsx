@@ -1,8 +1,8 @@
 import { useState, useEffect, useMemo, useRef } from "react";
 import { SUPABASE_READY, loadFromSupabase, saveToSupabase } from "./supabaseClient";
+import { KNOWN_BUYERS, INITIAL_EVENTS } from "./initialData";
 
 // ─── All unique buyer names from existing data ───
-const KNOWN_BUYERS = [];
 
 // ─── Status config ───
 const BUYER_STATUS = {
@@ -106,8 +106,6 @@ function BatchEditor({ initialQty, initialSt, initialDetail, maxQty, onSave, onC
   );
 }
 
-// ─── Initial data from Excel ───
-const INITIAL_EVENTS = [];
 
 function gid() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }
 
@@ -2377,6 +2375,38 @@ function MainApp() {
     }));
   };
 
+  // Order log data: 把所有 batch 依「訂購日期」分組,給「📅 訂購日曆」分頁用
+  // 日期來源優先順序:1) batch.addedAt (新建的批次) 2) buyer.addedAt (舊資料 fallback)
+  const orderLogData = useMemo(() => {
+    const byDate = new Map(); // dateKey -> [{eventName, eventId, eventStatus, buyerName, buyerIdx, qty, st, detail, ts}]
+    (events || []).forEach(evt => {
+      (evt.buyers || []).forEach((b, bi) => {
+        const batches = getBatches(b);
+        batches.forEach((bt, bti) => {
+          const ts = bt.addedAt || b.addedAt || null;
+          if (!ts) return; // 沒時間戳就跳過 (避免錯誤分組)
+          const d = new Date(ts);
+          if (isNaN(d.getTime())) return;
+          const dateKey = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+          if (!byDate.has(dateKey)) byDate.set(dateKey, []);
+          byDate.get(dateKey).push({
+            eventName: evt.name, eventId: evt.id, eventStatus: evt.status,
+            buyerName: b.name, buyerIdx: bi, batchIdx: bti,
+            qty: bt.qty, st: bt.st, detail: bt.detail || "", ts
+          });
+        });
+      });
+    });
+    // 排序:日期由新到舊
+    return Array.from(byDate.entries())
+      .sort((a, b) => b[0].localeCompare(a[0]))
+      .map(([date, items]) => ({
+        date,
+        items: items.sort((a, b) => b.ts - a.ts),
+        totalQty: items.reduce((s, x) => s + (x.qty || 0), 0),
+      }));
+  }, [events]);
+
   // Timeline data: group by date → by buyer (for 時間軸 tab)
   const timelineData = useMemo(() => {
     // 從 logs 撈所有異動，解析動作類型 + 對應的場次（讓「前往」按鈕能用）
@@ -2440,7 +2470,7 @@ function MainApp() {
   const addBuyerToEvent = (eventId, name) => {
     addLog(`【${getEventName(eventId)}】新增「${name}」`, snap());
     if (!buyerNames.includes(name)) setBuyerNames(ns => [...ns, name].sort((a, b) => a.localeCompare(b, "zh-TW")));
-    updateEvent(eventId, e => { e.buyers.push({ name, qty: 1, addedAt: Date.now(), batches: [{ qty: 1, st: "normal", detail: "" }] }); return e; });
+    updateEvent(eventId, e => { e.buyers.push({ name, qty: 1, addedAt: Date.now(), batches: [{ qty: 1, st: "normal", detail: "", addedAt: Date.now() }] }); return e; });
   };
 
   const updateBuyer = (eventId, idx, updates) => {
@@ -2567,10 +2597,10 @@ function MainApp() {
 
   const addBatch = (eventId, idx, batch) => {
     const evt = events.find(e => e.id === eventId); const b = evt?.buyers?.[idx];
-    if (b) addLog(`【${evt.name}】${b.name}：新增分批 ${batch.qty}張 ${BUYER_STATUS[batch.st]?.label||batch.st}`, snap());
+    if (b) addLog(`【${evt.name}】${b.name}:新增分批 ${batch.qty}張 ${BUYER_STATUS[batch.st]?.label||batch.st}`, snap());
     updateEvent(eventId, e => {
       const nb = migrateBuyer(e.buyers[idx]);
-      nb.batches = [...nb.batches, { qty: batch.qty, st: batch.st, detail: batch.detail || "" }];
+      nb.batches = [...nb.batches, { qty: batch.qty, st: batch.st, detail: batch.detail || "", addedAt: Date.now() }];
       nb.qty = nb.batches.reduce((s, x) => s + x.qty, 0);
       e.buyers[idx] = nb; return e;
     });
@@ -2972,7 +3002,7 @@ function MainApp() {
           <div style={{ display:"flex",gap:4,flexWrap:"wrap",alignItems:"center" }}>
             {(() => {
               const pendingTotal = events.filter(e=>e.status==="active"||e.status==="picked").reduce((s,e)=>s+countPendingFlag(e.buyers,"needRealName","gotRealName")+countPendingFlag(e.buyers,"needSid","gotSid")+countPendingFlag(e.buyers,"ticketDelivered","photoReceived"),0);
-              return [{key:"active",label:`進行中 (${activeEvents.length})`},{key:"picked",label:`已取票 (${pickedEvents.length})`},{key:"done",label:`已完成 (${doneEvents.length})`},{key:"pending",label:`📋 待收${pendingTotal>0?` (${pendingTotal})`:""}`},{key:"buyers",label:`👤 訂購人 (${buyersAggregated.length})`},{key:"identity",label:`📇 實名簿 (${identityCatalog.length})`},{key:"timeline",label:`📅 時間軸`}].map(t=>(
+              return [{key:"active",label:`進行中 (${activeEvents.length})`},{key:"picked",label:`已取票 (${pickedEvents.length})`},{key:"done",label:`已完成 (${doneEvents.length})`},{key:"pending",label:`📋 待收${pendingTotal>0?` (${pendingTotal})`:""}`},{key:"buyers",label:`👤 訂購人 (${buyersAggregated.length})`},{key:"identity",label:`📇 實名簿 (${identityCatalog.length})`},{key:"orderlog",label:`📅 訂購日曆`},{key:"timeline",label:`🕒 時間軸`}].map(t=>(
               <button key={t.key} onClick={()=>{setTab(t.key);setSearch("");setExpandedId(null);setShowLog(false);}} style={{ padding:"7px 16px",borderRadius:8,border:"none",fontSize:13,fontWeight:700,cursor:"pointer",fontFamily:"inherit",background:tab===t.key&&!showLog?"#8b7355":"transparent",color:tab===t.key&&!showLog?"#fff":"#a09888" }}>{t.label}</button>
               ));
             })()}
@@ -3669,6 +3699,63 @@ function MainApp() {
               })}
             </>);
           })()}
+        </div>)}
+
+        {/* Order Log (訂購日曆) view — 依訂購日期分組看 batch */}
+        {!showLog&&tab==="orderlog"&&(<div style={{ display:"flex",flexDirection:"column",gap:12 }}>
+          {orderLogData.length===0?(
+            <div style={{ background:"#fff",borderRadius:12,padding:"40px 20px",textAlign:"center",color:"#999" }}>
+              <div style={{ fontSize:36,marginBottom:8 }}>📅</div>
+              <div style={{ fontSize:14,fontWeight:700,marginBottom:4 }}>還沒有訂購紀錄</div>
+              <div style={{ fontSize:11 }}>每次新增訂購人 / 分批時,系統會記錄訂購日期到這裡</div>
+            </div>
+          ):(<>
+            {/* 摘要 */}
+            <div style={{ background:"#fff9ec",border:"1px solid #e4d4a0",borderRadius:10,padding:"10px 14px",fontSize:12,color:"#7a6028" }}>
+              📊 共 <b>{orderLogData.length}</b> 個訂購日 · 總 <b>{orderLogData.reduce((s,d)=>s+d.totalQty,0)}</b> 張 · <b>{orderLogData.reduce((s,d)=>s+d.items.length,0)}</b> 筆訂購
+            </div>
+            {orderLogData.map(group => {
+              const d = new Date(group.date + "T00:00:00");
+              const weekday = ["日","一","二","三","四","五","六"][d.getDay()];
+              const monthDay = `${d.getMonth()+1}/${d.getDate()}`;
+              const year = d.getFullYear();
+              // 按場次再分組,同場次同日合併
+              const byEvent = new Map();
+              group.items.forEach(it => {
+                if (!byEvent.has(it.eventName)) byEvent.set(it.eventName, { eventName: it.eventName, eventId: it.eventId, eventStatus: it.eventStatus, buyers: [], qty: 0 });
+                const ev = byEvent.get(it.eventName);
+                ev.buyers.push(it);
+                ev.qty += it.qty;
+              });
+              const eventGroups = Array.from(byEvent.values()).sort((a,b)=>b.qty-a.qty);
+              return (
+                <div key={group.date} style={{ background:"#fff",borderRadius:12,padding:"14px 16px",boxShadow:"0 2px 8px rgba(0,0,0,.04)" }}>
+                  <div style={{ display:"flex",alignItems:"baseline",justifyContent:"space-between",marginBottom:10,paddingBottom:8,borderBottom:"1px solid #f0ece2" }}>
+                    <div>
+                      <span style={{ fontSize:18,fontWeight:800,color:"#2d2a26" }}>{monthDay}</span>
+                      <span style={{ fontSize:11,color:"#888",marginLeft:8 }}>{year} · 週{weekday}</span>
+                    </div>
+                    <div style={{ fontSize:13,color:"#b8531a",fontWeight:700 }}>{group.totalQty} 張</div>
+                  </div>
+                  <div style={{ display:"flex",flexDirection:"column",gap:6 }}>
+                    {eventGroups.map((eg, ei) => (
+                      <div key={ei} style={{ display:"flex",alignItems:"baseline",gap:8,padding:"4px 0",fontSize:12 }}>
+                        <button onClick={()=>jumpToEvent(eg.eventId, eg.eventStatus)} style={{ padding:"2px 8px",borderRadius:5,border:"1px solid #d4d0c8",background:"#faf9f6",fontSize:11,cursor:"pointer",fontFamily:"inherit",color:"#5a5046",fontWeight:600,minWidth:0,maxWidth:160,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap" }} title={eg.eventName}>{eg.eventName}</button>
+                        <span style={{ flex:1,color:"#666" }}>
+                          {eg.buyers.map((b, bi) => (
+                            <span key={bi} style={{ marginRight:8 }}>
+                              {b.buyerName} <b style={{color:"#b8531a"}}>{b.qty}</b>
+                              {b.st!=="normal" && <span style={{ marginLeft:3,padding:"0 4px",borderRadius:3,background:BUYER_STATUS[b.st]?.bg||"#eee",color:BUYER_STATUS[b.st]?.color||"#999",fontSize:9,fontWeight:700 }}>{BUYER_STATUS[b.st]?.icon||""}</span>}
+                            </span>
+                          ))}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              );
+            })}
+          </>)}
         </div>)}
 
         {/* Timeline (時間軸) view */}
