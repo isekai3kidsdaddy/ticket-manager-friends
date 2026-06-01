@@ -4153,7 +4153,14 @@ function MainApp() {
                             if (sup) supTotals[sup] = (supTotals[sup] || 0) + (bt.qty || 0);
                           });
                           const ents = Object.entries(supTotals);
-                          if (ents.length === 0) return null;
+                          if (ents.length === 0) {
+                            // 完全沒設上游 → 顯示「+ 設定上游」placeholder,點下去開編輯
+                            if (batches.length === 0) return null; // 沒分批就不顯示
+                            return (
+                              <span onClick={()=>setSupplierEditModal({eventId:evt.id,buyerIdx:i})} title="點此設定上游(佩盈姐 / 君儀姐 ...)"
+                                style={{ fontSize:10,fontWeight:700,padding:"2px 8px",borderRadius:10,background:"#fafafa",color:"#999",border:"1px dashed #ccc",cursor:"pointer" }}>+ 設定上游</span>
+                            );
+                          }
                           return (
                             <span onClick={()=>setSupplierEditModal({eventId:evt.id,buyerIdx:i})} title="點此編輯各批次的上游"
                               style={{ fontSize:11,color:"#666",padding:"2px 8px",borderRadius:10,background:"rgba(255,255,255,.7)",border:"1px solid #d8d2c0",cursor:"pointer" }}>
