@@ -149,36 +149,50 @@ function ConfirmModal({ msg, onYes, onNo, onDismiss, yesLabel, noLabel, maxWidth
 // ─── 通用 popover 選單(把多顆按鈕收進一個 ▾ 選單) ───
 function ActionMenu({ label, items, color = "neutral", style }) {
   const [open, setOpen] = useState(false);
-  const [pos, setPos] = useState(null); // { top, left, openUpward }
+  const [pos, setPos] = useState(null); // { top, left, openUpward } in layout px
   const btnRef = useRef(null);
   const menuRef = useRef(null);
 
-  // 開啟時計算位置 — 用 fixed 定位脫離父層 overflow / stacking context
-  const computePos = () => {
-    const btn = btnRef.current;
-    if (!btn) return;
-    const r = btn.getBoundingClientRect();
-    const vh = window.innerHeight;
-    const estHeight = Math.min(visibleItems.length * 38 + 16, 320);
-    const spaceBelow = vh - r.bottom;
-    const openUpward = spaceBelow < estHeight + 20 && r.top > estHeight + 20;
-    setPos({
-      top: openUpward ? r.top - estHeight - 4 : r.bottom + 4,
-      left: r.left,
-      openUpward,
-    });
-  };
+  // visibleItems 先算 — 避免 TDZ + 給 useEffect 用
+  const visibleItems = items.filter(Boolean);
 
   useEffect(() => {
-    if (!open) return;
-    computePos();
+    if (!open) { setPos(null); return; }
+    const btn = btnRef.current;
+    if (!btn) return;
+
+    // 偵測祖先的 CSS zoom (桌機 1.3,手機 1)
+    // getBoundingClientRect 回傳的是視覺座標(已乘 zoom),
+    // 但 fixed 元素的 top/left 又會再被 zoom 一次 → 必須除以 zoom 抵消
+    let zoom = 1;
+    try {
+      const bz = parseFloat(getComputedStyle(document.body).zoom) || 1;
+      const hz = parseFloat(getComputedStyle(document.documentElement).zoom) || 1;
+      zoom = bz * hz;
+    } catch {}
+
+    const r = btn.getBoundingClientRect();
+    const lTop = r.top / zoom;
+    const lBottom = r.bottom / zoom;
+    const lLeft = r.left / zoom;
+    const lVh = window.innerHeight / zoom;
+    const lVw = window.innerWidth / zoom;
+    const estHeight = Math.min(visibleItems.length * 38 + 16, 320);
+    const spaceBelow = lVh - lBottom;
+    const openUpward = spaceBelow < estHeight + 16 && lTop > estHeight + 16;
+    setPos({
+      top: openUpward ? Math.max(8, lTop - estHeight - 4) : (lBottom + 4),
+      left: Math.max(8, Math.min(lLeft, lVw - 200)),
+      openUpward,
+    });
+
     const onDocClick = (e) => {
       if (menuRef.current?.contains(e.target)) return;
       if (btnRef.current?.contains(e.target)) return;
       setOpen(false);
     };
     const onEsc = (e) => { if (e.key === "Escape") setOpen(false); };
-    const onScrollOrResize = () => setOpen(false); // 捲動時直接關,避免 popover 飄掉
+    const onScrollOrResize = () => setOpen(false);
     document.addEventListener("mousedown", onDocClick);
     document.addEventListener("keydown", onEsc);
     window.addEventListener("scroll", onScrollOrResize, true);
@@ -192,7 +206,6 @@ function ActionMenu({ label, items, color = "neutral", style }) {
     // eslint-disable-next-line
   }, [open]);
 
-  const visibleItems = items.filter(Boolean);
   if (visibleItems.length === 0) return null;
   const colorMap = {
     neutral: { bd:"#d4d0c8", bg:"#fff", fg:"#5a5450" },
