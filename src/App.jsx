@@ -149,20 +149,49 @@ function ConfirmModal({ msg, onYes, onNo, onDismiss, yesLabel, noLabel, maxWidth
 // ─── 通用 popover 選單(把多顆按鈕收進一個 ▾ 選單) ───
 function ActionMenu({ label, items, color = "neutral", style }) {
   const [open, setOpen] = useState(false);
+  const [pos, setPos] = useState(null); // { top, left, openUpward }
+  const btnRef = useRef(null);
   const menuRef = useRef(null);
+
+  // 開啟時計算位置 — 用 fixed 定位脫離父層 overflow / stacking context
+  const computePos = () => {
+    const btn = btnRef.current;
+    if (!btn) return;
+    const r = btn.getBoundingClientRect();
+    const vh = window.innerHeight;
+    const estHeight = Math.min(visibleItems.length * 38 + 16, 320);
+    const spaceBelow = vh - r.bottom;
+    const openUpward = spaceBelow < estHeight + 20 && r.top > estHeight + 20;
+    setPos({
+      top: openUpward ? r.top - estHeight - 4 : r.bottom + 4,
+      left: r.left,
+      openUpward,
+    });
+  };
+
   useEffect(() => {
     if (!open) return;
+    computePos();
     const onDocClick = (e) => {
-      if (menuRef.current && !menuRef.current.contains(e.target)) setOpen(false);
+      if (menuRef.current?.contains(e.target)) return;
+      if (btnRef.current?.contains(e.target)) return;
+      setOpen(false);
     };
     const onEsc = (e) => { if (e.key === "Escape") setOpen(false); };
+    const onScrollOrResize = () => setOpen(false); // 捲動時直接關,避免 popover 飄掉
     document.addEventListener("mousedown", onDocClick);
     document.addEventListener("keydown", onEsc);
+    window.addEventListener("scroll", onScrollOrResize, true);
+    window.addEventListener("resize", onScrollOrResize);
     return () => {
       document.removeEventListener("mousedown", onDocClick);
       document.removeEventListener("keydown", onEsc);
+      window.removeEventListener("scroll", onScrollOrResize, true);
+      window.removeEventListener("resize", onScrollOrResize);
     };
+    // eslint-disable-next-line
   }, [open]);
+
   const visibleItems = items.filter(Boolean);
   if (visibleItems.length === 0) return null;
   const colorMap = {
@@ -172,16 +201,17 @@ function ActionMenu({ label, items, color = "neutral", style }) {
   };
   const c = colorMap[color] || colorMap.neutral;
   return (
-    <div ref={menuRef} style={{ position:"relative",display:"inline-block",...style }}>
-      <button onClick={()=>setOpen(o=>!o)} style={{
+    <>
+      <button ref={btnRef} onClick={()=>setOpen(o=>!o)} style={{
         padding:"6px 12px",borderRadius:8,border:`1px solid ${c.bd}`,background:c.bg,
         fontSize:12,cursor:"pointer",fontWeight:700,color:c.fg,fontFamily:"inherit",
+        ...style,
       }}>{label} <span style={{ fontSize:9,opacity:.7 }}>{open ? "▴" : "▾"}</span></button>
-      {open && (
-        <div style={{
-          position:"absolute",top:"calc(100% + 4px)",left:0,zIndex:100,
+      {open && pos && (
+        <div ref={menuRef} style={{
+          position:"fixed",top:pos.top,left:pos.left,zIndex:9999,
           background:"#fff",border:"1px solid #d4d0c8",borderRadius:8,
-          boxShadow:"0 6px 20px rgba(0,0,0,.12)",minWidth:190,padding:4,
+          boxShadow:"0 6px 20px rgba(0,0,0,.18)",minWidth:190,padding:4,
         }}>
           {visibleItems.map((item, i) => 
             item.divider ? (
@@ -201,7 +231,7 @@ function ActionMenu({ label, items, color = "neutral", style }) {
           )}
         </div>
       )}
-    </div>
+    </>
   );
 }
 
