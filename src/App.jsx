@@ -4252,6 +4252,46 @@ function MainApp() {
                           {(!b.identities || b.identities.length === 0) && (
                             <div style={{ fontSize:11,color:"#a09080",padding:"4px 2px" }}>還沒有代購 — 點「＋ 新增代購」加,或用「📥 批次匯入實名」</div>
                           )}
+                          {/* 同名彙總:某代購名在此 buyer 底下出現 2+ 次時,顯示「總張數 (上游A x · 上游B y)」 */}
+                          {(() => {
+                            const byName = new Map();
+                            (b.identities || []).forEach(it => {
+                              const nm = (it.name || "").trim();
+                              if (!nm) return;
+                              if (!byName.has(nm)) byName.set(nm, { total: 0, count: 0, suppliers: {} });
+                              const e = byName.get(nm);
+                              e.total += (it.qty || 0);
+                              e.count += 1;
+                              const sup = (it.supplier || "").trim();
+                              if (sup) e.suppliers[sup] = (e.suppliers[sup] || 0) + (it.qty || 0);
+                            });
+                            const dups = [...byName.entries()].filter(([_, e]) => e.count >= 2);
+                            if (dups.length === 0) return null;
+                            dups.sort((a, b) => b[1].total - a[1].total);
+                            return (
+                              <div style={{ marginBottom:6,padding:"5px 9px",background:"#fffbf0",borderRadius:6,border:"1px solid #e4d4a0",fontSize:11,color:"#7a6028",lineHeight:1.6 }}>
+                                <span style={{ fontWeight:700,marginRight:4 }}>🧮 同名彙總:</span>
+                                {dups.map(([nm, e], di) => {
+                                  const supEnts = Object.entries(e.suppliers).sort((a,b)=>b[1]-a[1]);
+                                  return (
+                                    <span key={nm}>
+                                      {di > 0 && <span style={{ opacity:.4,margin:"0 6px" }}>·</span>}
+                                      <b style={{ color:"#5a4a2a" }}>{nm}</b> <b style={{ color:"#b8531a" }}>{e.total}</b>
+                                      {supEnts.length > 0 && (
+                                        <span style={{ color:"#999" }}>
+                                          {" ("}
+                                          {supEnts.map(([s, q], si) => (
+                                            <span key={s}>{si > 0 && <span style={{ opacity:.5,margin:"0 3px" }}>·</span>}{s} <b style={{ color:"#7a6028" }}>{q}</b></span>
+                                          ))}
+                                          {")"}
+                                        </span>
+                                      )}
+                                    </span>
+                                  );
+                                })}
+                              </div>
+                            );
+                          })()}
                           {(b.identities||[]).map((it,k) => {
                             const ekey = `${evt.id}_${i}_${it.id}`;
                             const isOpen = expandedIdentity === ekey;
