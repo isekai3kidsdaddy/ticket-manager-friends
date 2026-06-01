@@ -1606,31 +1606,84 @@ function IdentityExportModal({ events, title, onClose }) {
     return () => window.removeEventListener("keydown", handleEsc);
   }, [onClose]);
 
-  // 收集所有實名資料 [{eventName, buyerName, identity}]
+  // 收集所有實名資料 — 4 層 mode 會展開到 subItems(代購底下的真實客人)
+  // 每 row 結構:{ eventName, buyerName, agent, supplier, name, qty, phone, idNumber, tixAccount, loginVia, locked, memberNo }
+  // 規則:
+  //   - 識別人有 subItems → 展開,每個 subItem 是一 row,agent=識別人名,supplier=識別人.supplier
+  //   - 識別人沒 subItems → 用識別人本身當 row,agent=空,supplier=識別人.supplier
   const rows = [];
   (events || []).forEach(evt => {
     (evt.buyers || []).forEach(b => {
       (b.identities || []).forEach(it => {
-        rows.push({ eventName: evt.name, buyerName: b.name, ...it });
+        if (Array.isArray(it.subItems) && it.subItems.length > 0) {
+          // 展開到細項實名 (代購底下的客人)
+          it.subItems.forEach(si => {
+            rows.push({
+              eventName: evt.name,
+              buyerName: b.name,
+              agent: it.name || "",
+              supplier: it.supplier || "",
+              name: si.name || "",
+              qty: si.qty || 1,
+              phone: si.phone || "",
+              idNumber: si.idNumber || "",
+              tixAccount: si.tixAccount || "",
+              loginVia: si.loginVia || "",
+              locked: !!si.locked,
+              memberNo: si.memberNo || "",
+            });
+          });
+        } else {
+          // 沒 subItems → 用識別人本身當 row(舊資料 / 3 層 mode)
+          rows.push({
+            eventName: evt.name,
+            buyerName: b.name,
+            agent: "",
+            supplier: it.supplier || "",
+            name: it.name || "",
+            qty: it.qty || 1,
+            phone: it.phone || "",
+            idNumber: it.idNumber || "",
+            tixAccount: it.tixAccount || "",
+            loginVia: it.loginVia || "",
+            locked: !!it.locked,
+            memberNo: it.memberNo || "",
+          });
+        }
       });
     });
   });
   const totalIdentities = rows.length;
+  // 偵測:有沒有任何 row 帶 agent(代購層)?有 → 顯示 4 層欄位
+  const hasAgent = rows.some(r => r.agent);
 
   const loginLabel = (v) => v === "facebook" ? "FB" : v === "google" ? "Google" : "";
 
-  // 文字格式（給 LINE 看的，分場次分人）
+  // 文字格式 — 給 LINE 看,分場次 → 訂購人 → 代購(若有)分群
   const textOutput = (() => {
     const lines = [];
     (events || []).forEach(evt => {
-      const evtRows = (evt.buyers || []).flatMap(b =>
-        (b.identities || []).map(it => ({ buyerName: b.name, ...it }))
-      );
+      const evtRows = rows.filter(r => r.eventName === evt.name);
       if (evtRows.length === 0) return;
-      lines.push(`📌 ${evt.name}（${evtRows.length} 筆）`);
-      let lastBuyer = "";
+      lines.push(`📌 ${evt.name}(${evtRows.length} 筆)`);
+      let lastBuyer = "", lastAgentKey = "";
       evtRows.forEach(r => {
-        if (r.buyerName !== lastBuyer) { lines.push(`【${r.buyerName}】`); lastBuyer = r.buyerName; }
+        if (r.buyerName !== lastBuyer) {
+          lines.push(`【${r.buyerName}】`);
+          lastBuyer = r.buyerName;
+          lastAgentKey = "";
+        }
+        // 4 層:有 agent 時,同 agent + supplier 分一群
+        if (r.agent) {
+          const agentKey = `${r.agent}|${r.supplier}`;
+          if (agentKey !== lastAgentKey) {
+            const supTxt = r.supplier ? `(${r.supplier}供)` : "";
+            lines.push(`  ▸ 代購 ${r.agent}${supTxt}`);
+            lastAgentKey = agentKey;
+          }
+        } else {
+          lastAgentKey = "";
+        }
         const parts = [];
         parts.push(`姓名:${r.name||"(未填)"}`);
         parts.push(`拿 ${r.qty||1} 張`);
@@ -1641,20 +1694,25 @@ function IdentityExportModal({ events, title, onClose }) {
         if (login) parts.push(`登入:${login}`);
         if (r.locked) parts.push(`🔒帳號鎖`);
         if (r.memberNo) parts.push(`會員#:${r.memberNo}`);
-        lines.push("  " + parts.join(" / "));
+        // 縮排:有 agent 多縮一層
+        const indent = r.agent ? "      " : "  ";
+        lines.push(indent + parts.join(" / "));
       });
       lines.push("");
     });
     return lines.join("\n").trim();
   })();
 
-  // Excel/Sheet 格式（tab 分隔）
-  const headers = ["場次","訂購人","姓名","拿幾張","電話","身分證","拓元帳號","登入方式","帳號被鎖","會員編號"];
+  // Excel/Sheet 格式(tab 分隔) — 4 層 mode 多兩欄:代購、上游
+  const headers = hasAgent
+    ? ["場次","訂購人","代購","上游","姓名","拿幾張","電話","身分證","拓元帳號","登入方式","帳號被鎖","會員編號"]
+    : ["場次","訂購人","姓名","拿幾張","電話","身分證","拓元帳號","登入方式","帳號被鎖","會員編號"];
+  const rowToCells = (r) => hasAgent
+    ? [r.eventName, r.buyerName, r.agent||"", r.supplier||"", r.name||"", r.qty||1, r.phone||"", r.idNumber||"", r.tixAccount||"", loginLabel(r.loginVia), r.locked?"是":"", r.memberNo||""]
+    : [r.eventName, r.buyerName, r.name||"", r.qty||1, r.phone||"", r.idNumber||"", r.tixAccount||"", loginLabel(r.loginVia), r.locked?"是":"", r.memberNo||""];
   const sheetOutput = (() => {
     const lines = [headers.join("\t")];
-    rows.forEach(r => {
-      lines.push([r.eventName, r.buyerName, r.name||"", r.qty||1, r.phone||"", r.idNumber||"", r.tixAccount||"", loginLabel(r.loginVia), r.locked?"是":"", r.memberNo||""].join("\t"));
-    });
+    rows.forEach(r => { lines.push(rowToCells(r).join("\t")); });
     return lines.join("\n");
   })();
 
@@ -1662,9 +1720,7 @@ function IdentityExportModal({ events, title, onClose }) {
   const csvOutput = (() => {
     const escape = v => `"${String(v||"").replace(/"/g,'""')}"`;
     const lines = [headers.map(escape).join(",")];
-    rows.forEach(r => {
-      lines.push([r.eventName, r.buyerName, r.name||"", r.qty||1, r.phone||"", r.idNumber||"", r.tixAccount||"", loginLabel(r.loginVia), r.locked?"是":"", r.memberNo||""].map(escape).join(","));
-    });
+    rows.forEach(r => { lines.push(rowToCells(r).map(escape).join(",")); });
     return lines.join("\n");
   })();
 
