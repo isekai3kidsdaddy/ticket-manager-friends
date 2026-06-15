@@ -4713,13 +4713,15 @@ function MainApp() {
                                     <span onClick={()=>setExpandedIdentity(isOpen?null:ekey)} title="點此設定上游"
                                       style={{ fontSize:10,fontWeight:700,padding:"1px 7px",borderRadius:5,background:"#fafafa",color:"#999",border:"1px dashed #ccc",cursor:"pointer" }}>+ 上游</span>
                                   )}
-                                  {/* 細項實名指示器 (僅 4 層 mode 顯示) */}
-                                  {is4LayerMode && subItems.length > 0 && (
-                                    subDiff === 0
-                                      ? <span style={{ fontSize:10,fontWeight:700,padding:"1px 6px",borderRadius:5,background:"#dfeadf",color:"#3a7a3a" }}>📝 實名 {subQty}/{itQty} ✓</span>
-                                      : subDiff > 0
-                                        ? <span style={{ fontSize:10,fontWeight:700,padding:"1px 6px",borderRadius:5,background:"#fce8e8",color:"#8b3a3a" }}>📝 實名 {subQty}/{itQty} 缺 {subDiff}</span>
-                                        : <span style={{ fontSize:10,fontWeight:700,padding:"1px 6px",borderRadius:5,background:"#f6ecd8",color:"#8b6a2d" }}>📝 實名 {subQty}/{itQty} 多 {-subDiff}</span>
+                                  {/* 細項實名指示器 (僅 4 層 mode 顯示) — 永遠顯示讓樣式統一 */}
+                                  {is4LayerMode && (
+                                    subItems.length === 0
+                                      ? <span style={{ fontSize:10,fontWeight:700,padding:"1px 6px",borderRadius:5,background:"#fce8e8",color:"#8b3a3a" }}>📝 實名 0/{itQty} 缺 {itQty}</span>
+                                      : subDiff === 0
+                                        ? <span style={{ fontSize:10,fontWeight:700,padding:"1px 6px",borderRadius:5,background:"#dfeadf",color:"#3a7a3a" }}>📝 實名 {subQty}/{itQty} ✓</span>
+                                        : subDiff > 0
+                                          ? <span style={{ fontSize:10,fontWeight:700,padding:"1px 6px",borderRadius:5,background:"#fce8e8",color:"#8b3a3a" }}>📝 實名 {subQty}/{itQty} 缺 {subDiff}</span>
+                                          : <span style={{ fontSize:10,fontWeight:700,padding:"1px 6px",borderRadius:5,background:"#f6ecd8",color:"#8b6a2d" }}>📝 實名 {subQty}/{itQty} 多 {-subDiff}</span>
                                   )}
                                   {is4LayerMode && (
                                     <button onClick={()=>openIdentityRealnameLink(evt.id,i,it.id)}
