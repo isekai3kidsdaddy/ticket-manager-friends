@@ -2053,13 +2053,14 @@ function concertCities(s) {
 }
 function concertStripCity(t) { let r = t; CONCERT_CITIES.forEach(c => { r = r.split(c).join(""); }); return r; }
 // 回傳 [0..1] 相似度(0 = 不相符)
-function concertNameScore(concertNames, eventName) {
+function concertNameScore(concertNames, eventName, cityHint) {
   const evCities = concertCities(eventName);
   const evCore = concertStripCity(concertNorm(eventName));
   if (!evCore || evCore.length < 2) return 0;
   let best = 0;
   for (const cn of concertNames) {
-    const cCities = concertCities(cn);
+    const cCities0 = concertCities(cn);
+    const cCities = cCities0.length ? cCities0 : (cityHint || []);
     if (evCities.length && cCities.length && !evCities.some(c => cCities.includes(c))) continue; // 城市不同
     const cCore = concertStripCity(concertNorm(cn));
     if (!cCore || cCore.length < 2) continue;
@@ -2078,7 +2079,7 @@ function concertMatchEvents(concert, events) {
   (events || []).forEach(e => {
     if (excluded.has(e.id)) return;
     const isLinked = linked.has(e.id);
-    const sc = isLinked ? 1 : concertNameScore(names, e.name);
+    const sc = isLinked ? 1 : concertNameScore(names, e.name, concertCities(concert.name));
     if (sc >= 0.6) {
       const qty = (e.buyers || []).reduce((s, b) => s + buyerTotalQty(b), 0);
       out.push({ event: e, qty, manual: isLinked, score: sc });
@@ -2108,16 +2109,18 @@ function ConcertCalendarTab({ events, jumpToEvent }) {
   };
   useEffect(() => { load(); }, []);
 
-  const patch = async (id, fields) => {
-    const { error } = await supabase.from("taiwan_concerts").update(fields).eq("id", id);
+  const patch = async (ids, fields) => {
+    const list = Array.isArray(ids) ? ids : [ids];
+    const { error } = await supabase.from("taiwan_concerts").update(fields).in("id", list);
     if (error) { alert("儲存失敗:" + error.message); return; }
-    setRows(rs => rs.map(r => r.id === id ? { ...r, ...fields } : r));
+    setRows(rs => rs.map(r => list.includes(r.id) ? { ...r, ...fields } : r));
   };
   const remove = async (r) => {
-    if (!window.confirm(`刪除「${r.name}」?`)) return;
-    const { error } = await supabase.from("taiwan_concerts").delete().eq("id", r.id);
+    const n = (r.ids || [r.id]).length;
+    if (!window.confirm(`刪除「${r.name}」${n > 1 ? `(共 ${n} 天)` : ""}?`)) return;
+    const { error } = await supabase.from("taiwan_concerts").delete().in("id", r.ids || [r.id]);
     if (error) { alert("刪除失敗:" + error.message); return; }
-    setRows(rs => rs.filter(x => x.id !== r.id));
+    setRows(rs => rs.filter(x => !(r.ids || [r.id]).includes(x.id)));
   };
   const submitAdd = async () => {
     if (!form.name.trim() || !form.event_date) { alert("請至少填演出名稱與日期"); return; }
@@ -2133,16 +2136,32 @@ function ConcertCalendarTab({ events, jumpToEvent }) {
   };
 
   const today = new Date(); const todayStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
-  const enriched = useMemo(() => rows.map(r => {
-    const matches = concertMatchEvents(r, events);
-    return { ...r, matches, total: matches.reduce((s, m) => s + m.qty, 0) };
-  }), [rows, events]);
+  const enriched = useMemo(() => {
+    // 同名稱+同場地+同狀態 的多日演出合併成一張卡,以首日排序
+    const map = new Map();
+    rows.forEach(r => {
+      const k = `${r.name}|${r.venue || ""}|${r.status}`;
+      if (!map.has(k)) map.set(k, []);
+      map.get(k).push(r);
+    });
+    return Array.from(map.values()).map(grp => {
+      grp.sort((a, b) => String(a.event_date).localeCompare(String(b.event_date)));
+      const first = grp[0];
+      const linked = [...new Set(grp.flatMap(g => g.linked_event_ids || []))];
+      const excluded = [...new Set(grp.flatMap(g => g.excluded_event_ids || []))];
+      const merged = { ...first, linked_event_ids: linked, excluded_event_ids: excluded };
+      const matches = concertMatchEvents(merged, events);
+      // 回看過期:整組最後一天已過才算過期
+      const lastDate = grp[grp.length - 1].event_date;
+      return { ...merged, ids: grp.map(g => g.id), dates: grp.map(g => g.event_date), lastDate, matches, total: matches.reduce((s, m) => s + m.qty, 0) };
+    }).sort((a, b) => String(a.event_date).localeCompare(String(b.event_date)));
+  }, [rows, events]);
 
   const kw = q.trim().toLowerCase();
   const filt = enriched.filter(r => {
     if (kw && !(`${r.name} ${r.venue || ""} ${(r.aliases || []).join(" ")}`.toLowerCase().includes(kw))) return false;
     if (onlyMine && r.matches.length === 0) return false;
-    if (!showPast && String(r.event_date) < todayStr) return false;
+    if (!showPast && String(r.lastDate) < todayStr) return false;
     return true;
   });
   const pending = filt.filter(r => r.status === "pending");
@@ -2158,9 +2177,10 @@ function ConcertCalendarTab({ events, jumpToEvent }) {
   const Card = ({ r, isPending }) => (
     <div style={{ background: "#fff", border: `1px solid ${isPending ? "#e0c070" : "#e0dcd2"}`, borderRadius: 12, padding: "10px 14px", display: "flex", flexDirection: "column", gap: 6 }}>
       <div style={{ display: "flex", gap: 10, alignItems: "flex-start", flexWrap: "wrap" }}>
-        <div style={{ minWidth: 70, fontWeight: 800, color: "#8b7355", fontSize: 14 }}>{fmtDate(r.event_date)}</div>
+        <div style={{ minWidth: 70, fontWeight: 800, color: "#8b7355", fontSize: 14 }}>{fmtDate(r.event_date)}{r.dates.length > 1 && <div style={{ fontSize: 11, fontWeight: 700, color: "#a09888" }}>共 {r.dates.length} 天</div>}</div>
         <div style={{ flex: 1, minWidth: 160 }}>
           <div style={{ fontWeight: 700, fontSize: 14, color: "#3a3329" }}>{r.name}</div>
+          {r.dates.length > 1 && <div style={{ fontSize: 12, color: "#5a5046", marginTop: 2, fontWeight: 600 }}>🗓 演出日:{r.dates.map(d => fmtDate(d)).join("、")}</div>}
           <div style={{ fontSize: 12, color: "#8a8272", marginTop: 2 }}>📍 {r.venue || "場地未定"}{r.source && r.source !== "manual" ? ` · ${r.source}` : ""}{isPending && r.confidence != null ? ` · 信心 ${Math.round(r.confidence * 100)}%` : ""}</div>
         </div>
         {r.total > 0 && <div style={{ padding: "4px 12px", borderRadius: 14, background: "#8b7355", color: "#fff", fontWeight: 800, fontSize: 13, whiteSpace: "nowrap" }}>🎫 共 {r.total} 張</div>}
@@ -2175,13 +2195,13 @@ function ConcertCalendarTab({ events, jumpToEvent }) {
         </div>
       )}
       <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-        {isPending && <button style={btn("#e8f0e4", "#4a7a3a")} onClick={() => patch(r.id, { status: "approved" })}>✓ 核准</button>}
-        {isPending && <button style={btn("#fdeaea", "#b03a3a")} onClick={() => patch(r.id, { status: "rejected" })}>✕ 略過</button>}
-        <button style={btn("#fff", "#8b7355")} onClick={() => setLinkingId(linkingId === r.id ? null : r.id)}>🔗 連結場次</button>
+        {isPending && <button style={btn("#e8f0e4", "#4a7a3a")} onClick={() => patch(r.ids, { status: "approved" })}>✓ 核准</button>}
+        {isPending && <button style={btn("#fdeaea", "#b03a3a")} onClick={() => patch(r.ids, { status: "rejected" })}>✕ 略過</button>}
+        <button style={btn("#fff", "#8b7355")} onClick={() => setLinkingId(linkingId === r.ids[0] ? null : r.ids[0])}>🔗 連結場次</button>
         {r.url && <a href={r.url} target="_blank" rel="noreferrer" style={{ ...btn("#fff", "#8b7355"), textDecoration: "none" }}>來源</a>}
         <button style={btn("#fff", "#b03a3a")} onClick={() => remove(r)}>刪除</button>
       </div>
-      {linkingId === r.id && (
+      {linkingId === r.ids[0] && (
         <div style={{ borderTop: "1px dashed #e0dcd2", paddingTop: 8, display: "flex", flexDirection: "column", gap: 4, maxHeight: 220, overflowY: "auto" }}>
           <div style={{ fontSize: 11, color: "#8a8272" }}>勾選=算進此演出;取消自動比對錯的也是這裡</div>
           {events.filter(e => e.status !== "done" || r.matches.some(m => m.event.id === e.id)).map(e => {
@@ -2191,7 +2211,7 @@ function ConcertCalendarTab({ events, jumpToEvent }) {
                 <input type="checkbox" checked={on} onChange={() => {
                   const linked = new Set(r.linked_event_ids || []); const excl = new Set(r.excluded_event_ids || []);
                   if (on) { linked.delete(e.id); excl.add(e.id); } else { excl.delete(e.id); linked.add(e.id); }
-                  patch(r.id, { linked_event_ids: [...linked], excluded_event_ids: [...excl] });
+                  patch(r.ids, { linked_event_ids: [...linked], excluded_event_ids: [...excl] });
                 }} />
                 {e.name}
               </label>
@@ -2233,13 +2253,13 @@ function ConcertCalendarTab({ events, jumpToEvent }) {
       {pending.length > 0 && (
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
           <div style={{ fontWeight: 800, fontSize: 13, color: "#a07a10" }}>🟡 待審 ({pending.length})</div>
-          {pending.map(r => <Card key={r.id} r={r} isPending />)}
+          {pending.map(r => <Card key={r.ids[0]} r={r} isPending />)}
         </div>
       )}
       {Object.keys(byMonth).sort().map(m => (
         <div key={m} style={{ display: "flex", flexDirection: "column", gap: 8 }}>
           <div style={{ fontWeight: 800, fontSize: 13, color: "#5a5046", borderBottom: "2px solid #e0dcd2", paddingBottom: 3 }}>{m.replace("-", " 年 ")} 月</div>
-          {byMonth[m].map(r => <Card key={r.id} r={r} />)}
+          {byMonth[m].map(r => <Card key={r.ids[0]} r={r} />)}
         </div>
       ))}
       {!loading && !err && approved.length === 0 && pending.length === 0 && <div style={{ color: "#a09888", fontSize: 13, textAlign: "center", padding: 30 }}>沒有符合的演出,可用「＋ 手動新增」,或等自動爬取上線</div>}
