@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useRef } from "react";
-import { SUPABASE_READY, loadFromSupabase, saveToSupabase } from "./supabaseClient";
+import { SUPABASE_READY, supabase, loadFromSupabase, saveToSupabase } from "./supabaseClient";
 import * as InitData from "./initialData";
 const KNOWN_BUYERS = InitData.KNOWN_BUYERS;
 const INITIAL_EVENTS = InitData.INITIAL_EVENTS;
@@ -72,13 +72,40 @@ function countPendingFlag(buyers, needFlag, gotFlag) {
 }
 
 // Inline editor for creating/editing a single batch (qty + status + detail)
-function BatchEditor({ initialQty, initialSt, initialDetail, maxQty, onSave, onCancel, canEditQty = true }) {
+function BatchEditor({ initialQty, initialSt, initialDetail, initialAddedAt, maxQty, onSave, onCancel, canEditQty = true }) {
   const [qty, setQty] = useState(initialQty || 1);
   const [st, setSt] = useState(initialSt || "normal");
   const [detail, setDetail] = useState(initialDetail || "");
+  // 日期 (yyyy-mm-dd) — 沒 initialAddedAt 就用今天
+  const [dateStr, setDateStr] = useState(() => {
+    const d = initialAddedAt ? new Date(initialAddedAt) : new Date();
+    return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+  });
   const showDetail = st === "picked" || st === "refund" || st === "refunded";
   const label = st === "picked" ? "取票明細" : (st === "refund" || st === "refunded") ? "退費金額" : "";
   const ph = st === "picked" ? "例：2張6880、2張5880" : (st === "refund" || st === "refunded") ? "例：2000" : "";
+  const buildPayload = () => {
+    const payload = { qty, st, detail };
+    // 若使用者改了日期,把 addedAt 更新;若沒 initialAddedAt (舊 batch) 且用戶選了日期,也存
+    if (dateStr) {
+      const [y,m,d] = dateStr.split("-").map(Number);
+      const chosen = new Date(y, m-1, d);
+      // 只在日期跟 initial 不同時 (或原本沒 addedAt) 才更新
+      const initialDay = initialAddedAt ? (() => {
+        const d0 = new Date(initialAddedAt);
+        return `${d0.getFullYear()}-${String(d0.getMonth()+1).padStart(2,"0")}-${String(d0.getDate()).padStart(2,"0")}`;
+      })() : null;
+      if (!initialAddedAt || dateStr !== initialDay) {
+        // 保留原本的時分秒 (若有的話),只換日期
+        if (initialAddedAt) {
+          const orig = new Date(initialAddedAt);
+          chosen.setHours(orig.getHours(), orig.getMinutes(), orig.getSeconds(), 0);
+        }
+        payload.addedAt = chosen.getTime();
+      }
+    }
+    return payload;
+  };
   return (
     <div onClick={e=>e.stopPropagation()} style={{ marginTop:6, padding:"10px 12px", borderRadius:8, border:"1.5px dashed #c4b89a", background:"#fff9ec", display:"flex", flexDirection:"column", gap:8 }}>
       {canEditQty && (
@@ -99,13 +126,19 @@ function BatchEditor({ initialQty, initialSt, initialDetail, maxQty, onSave, onC
         <div style={{ display:"flex", gap:6, alignItems:"center" }}>
           <span style={{ fontSize:12, fontWeight:600, color:"#888", whiteSpace:"nowrap" }}>{label}：</span>
           <input autoFocus value={detail} onChange={e=>setDetail(e.target.value)} placeholder={ph}
-            onKeyDown={e=>{ if(e.key==="Enter") onSave({qty,st,detail}); if(e.key==="Escape") onCancel(); }}
+            onKeyDown={e=>{ if(e.key==="Enter") onSave(buildPayload()); if(e.key==="Escape") onCancel(); }}
             style={{ flex:1, padding:"6px 10px", borderRadius:7, border:"1.5px solid #d4d0c8", fontSize:13, fontFamily:"inherit", background:"#fff", minWidth:0 }}/>
         </div>
       )}
+      <div style={{ display:"flex", gap:6, alignItems:"center" }}>
+        <span style={{ fontSize:12, fontWeight:600, color:"#888", whiteSpace:"nowrap" }}>訂購日期：</span>
+        <input type="date" value={dateStr} onChange={e=>setDateStr(e.target.value)}
+          style={{ padding:"5px 8px", borderRadius:7, border:"1.5px solid #d4d0c8", fontSize:13, fontFamily:"inherit", background:"#fff" }}/>
+        <span style={{ fontSize:11, color:"#a09080" }}>{initialAddedAt ? "改日期會覆蓋原本記錄" : "預設今天,若是補記舊訂單請改"}</span>
+      </div>
       <div style={{ display:"flex", gap:6, justifyContent:"flex-end" }}>
         <button onClick={onCancel} style={{ padding:"5px 12px", borderRadius:7, border:"1px solid #d4d0c8", background:"#fff", fontSize:12, cursor:"pointer", fontFamily:"inherit", color:"#999" }}>取消</button>
-        <button onClick={()=>onSave({qty,st,detail})} style={{ padding:"5px 14px", borderRadius:7, border:"none", background:"#2d2a26", color:"#faf9f6", fontSize:12, fontWeight:700, cursor:"pointer", fontFamily:"inherit" }}>確認</button>
+        <button onClick={()=>onSave(buildPayload())} style={{ padding:"5px 14px", borderRadius:7, border:"none", background:"#2d2a26", color:"#faf9f6", fontSize:12, fontWeight:700, cursor:"pointer", fontFamily:"inherit" }}>確認</button>
       </div>
     </div>
   );
@@ -2001,6 +2034,219 @@ function IdentityExportModal({ events, title, onClose }) {
   );
 }
 
+// ═══════════ 🎵 演唱會日曆 (taiwan_concerts) ═══════════
+const CONCERT_CITIES = ["台北","新北","桃園","新竹","台中","台南","高雄","屏東","宜蘭","花蓮","台東"];
+const CONCERT_NOISE = ["演唱會","巡迴","世界巡迴","巡演","見面會","粉絲見面會","音樂會","fanmeeting","fanmeet","worldtour","tour","live","concert","inconcert","in","taipei","kaohsiung","taiwan","台灣","加場","首爾","encore","final","the","world","fan","meeting"];
+function concertNorm(s) {
+  let t = String(s || "").toLowerCase().replace(/臺/g, "台");
+  t = t.replace(/[\s\-_.,:：;；!！?？'"“”‘’()（）\[\]【】《》<>「」『』~～+＋&×x/\\|·・]/g, "");
+  t = t.replace(/(19|20)\d{2}/g, "");
+  CONCERT_NOISE.slice().sort((a, b) => b.length - a.length).forEach(w => { t = t.split(w).join(""); });
+  return t;
+}
+function concertCities(s) {
+  const t = String(s || "").replace(/臺/g, "台");
+  const out = CONCERT_CITIES.filter(c => t.includes(c));
+  if (/taipei/i.test(t) && !out.includes("台北")) out.push("台北");
+  if (/kaohsiung/i.test(t) && !out.includes("高雄")) out.push("高雄");
+  return out;
+}
+function concertStripCity(t) { let r = t; CONCERT_CITIES.forEach(c => { r = r.split(c).join(""); }); return r; }
+// 回傳 [0..1] 相似度(0 = 不相符)
+function concertNameScore(concertNames, eventName) {
+  const evCities = concertCities(eventName);
+  const evCore = concertStripCity(concertNorm(eventName));
+  if (!evCore || evCore.length < 2) return 0;
+  let best = 0;
+  for (const cn of concertNames) {
+    const cCities = concertCities(cn);
+    if (evCities.length && cCities.length && !evCities.some(c => cCities.includes(c))) continue; // 城市不同
+    const cCore = concertStripCity(concertNorm(cn));
+    if (!cCore || cCore.length < 2) continue;
+    let sc = 0;
+    if (cCore === evCore) sc = 1;
+    else if (Math.min(cCore.length, evCore.length) >= 3 && (cCore.includes(evCore) || evCore.includes(cCore))) sc = 0.85;
+    if (sc > best) best = sc;
+  }
+  return best;
+}
+function concertMatchEvents(concert, events) {
+  const names = [concert.name, ...(concert.aliases || [])].filter(Boolean);
+  const linked = new Set(concert.linked_event_ids || []);
+  const excluded = new Set(concert.excluded_event_ids || []);
+  const out = [];
+  (events || []).forEach(e => {
+    if (excluded.has(e.id)) return;
+    const isLinked = linked.has(e.id);
+    const sc = isLinked ? 1 : concertNameScore(names, e.name);
+    if (sc >= 0.6) {
+      const qty = (e.buyers || []).reduce((s, b) => s + buyerTotalQty(b), 0);
+      out.push({ event: e, qty, manual: isLinked, score: sc });
+    }
+  });
+  return out;
+}
+
+function ConcertCalendarTab({ events, jumpToEvent }) {
+  const [rows, setRows] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState("");
+  const [q, setQ] = useState("");
+  const [showPast, setShowPast] = useState(false);
+  const [onlyMine, setOnlyMine] = useState(false);
+  const [adding, setAdding] = useState(false);
+  const [form, setForm] = useState({ name: "", event_date: "", venue: "", url: "", aliases: "" });
+  const [linkingId, setLinkingId] = useState(null);
+
+  const load = async () => {
+    if (!SUPABASE_READY) { setLoading(false); setErr("尚未設定雲端 (Supabase),無法使用演唱會日曆"); return; }
+    setLoading(true); setErr("");
+    const { data, error } = await supabase.from("taiwan_concerts").select("*").order("event_date", { ascending: true });
+    if (error) { setErr(error.message || "讀取失敗"); setRows([]); }
+    else setRows(data || []);
+    setLoading(false);
+  };
+  useEffect(() => { load(); }, []);
+
+  const patch = async (id, fields) => {
+    const { error } = await supabase.from("taiwan_concerts").update(fields).eq("id", id);
+    if (error) { alert("儲存失敗:" + error.message); return; }
+    setRows(rs => rs.map(r => r.id === id ? { ...r, ...fields } : r));
+  };
+  const remove = async (r) => {
+    if (!window.confirm(`刪除「${r.name}」?`)) return;
+    const { error } = await supabase.from("taiwan_concerts").delete().eq("id", r.id);
+    if (error) { alert("刪除失敗:" + error.message); return; }
+    setRows(rs => rs.filter(x => x.id !== r.id));
+  };
+  const submitAdd = async () => {
+    if (!form.name.trim() || !form.event_date) { alert("請至少填演出名稱與日期"); return; }
+    const rec = {
+      name: form.name.trim(), event_date: form.event_date, venue: form.venue.trim() || null, url: form.url.trim() || null,
+      aliases: form.aliases.split(/[,，、\n]/).map(s => s.trim()).filter(Boolean),
+      source: "manual", confidence: 1, status: "approved",
+    };
+    const { data, error } = await supabase.from("taiwan_concerts").insert(rec).select();
+    if (error) { alert("新增失敗:" + error.message); return; }
+    setRows(rs => [...rs, ...(data || [])].sort((a, b) => String(a.event_date).localeCompare(String(b.event_date))));
+    setForm({ name: "", event_date: "", venue: "", url: "", aliases: "" }); setAdding(false);
+  };
+
+  const today = new Date(); const todayStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
+  const enriched = useMemo(() => rows.map(r => {
+    const matches = concertMatchEvents(r, events);
+    return { ...r, matches, total: matches.reduce((s, m) => s + m.qty, 0) };
+  }), [rows, events]);
+
+  const kw = q.trim().toLowerCase();
+  const filt = enriched.filter(r => {
+    if (kw && !(`${r.name} ${r.venue || ""} ${(r.aliases || []).join(" ")}`.toLowerCase().includes(kw))) return false;
+    if (onlyMine && r.matches.length === 0) return false;
+    if (!showPast && String(r.event_date) < todayStr) return false;
+    return true;
+  });
+  const pending = filt.filter(r => r.status === "pending");
+  const approved = filt.filter(r => r.status !== "pending" && r.status !== "rejected");
+  const byMonth = {};
+  approved.forEach(r => { const k = String(r.event_date).slice(0, 7); (byMonth[k] = byMonth[k] || []).push(r); });
+  const wk = ["日", "一", "二", "三", "四", "五", "六"];
+  const fmtDate = (d) => { const dt = new Date(d + "T00:00:00"); return isNaN(dt) ? d : `${dt.getMonth() + 1}/${dt.getDate()} (${wk[dt.getDay()]})`; };
+  const myTotal = approved.reduce((s, r) => s + r.total, 0);
+  const inp = { padding: "7px 10px", borderRadius: 8, border: "1px solid #d4d0c8", fontSize: 13, fontFamily: "inherit", boxSizing: "border-box", width: "100%" };
+  const btn = (bg, color) => ({ padding: "5px 12px", borderRadius: 7, border: "1px solid #d4d0c8", background: bg, color, fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" });
+
+  const Card = ({ r, isPending }) => (
+    <div style={{ background: "#fff", border: `1px solid ${isPending ? "#e0c070" : "#e0dcd2"}`, borderRadius: 12, padding: "10px 14px", display: "flex", flexDirection: "column", gap: 6 }}>
+      <div style={{ display: "flex", gap: 10, alignItems: "flex-start", flexWrap: "wrap" }}>
+        <div style={{ minWidth: 70, fontWeight: 800, color: "#8b7355", fontSize: 14 }}>{fmtDate(r.event_date)}</div>
+        <div style={{ flex: 1, minWidth: 160 }}>
+          <div style={{ fontWeight: 700, fontSize: 14, color: "#3a3329" }}>{r.name}</div>
+          <div style={{ fontSize: 12, color: "#8a8272", marginTop: 2 }}>📍 {r.venue || "場地未定"}{r.source && r.source !== "manual" ? ` · ${r.source}` : ""}{isPending && r.confidence != null ? ` · 信心 ${Math.round(r.confidence * 100)}%` : ""}</div>
+        </div>
+        {r.total > 0 && <div style={{ padding: "4px 12px", borderRadius: 14, background: "#8b7355", color: "#fff", fontWeight: 800, fontSize: 13, whiteSpace: "nowrap" }}>🎫 共 {r.total} 張</div>}
+      </div>
+      {r.matches.length > 0 && (
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+          {r.matches.map(m => (
+            <button key={m.event.id} onClick={() => jumpToEvent(m.event.id, m.event.status)} title={m.manual ? "手動連結" : "自動比對"} style={{ padding: "3px 10px", borderRadius: 8, border: "1px solid #d4d0c8", background: m.manual ? "#e8f0e4" : "#faf9f6", fontSize: 11, fontWeight: 600, color: "#5a5046", cursor: "pointer", fontFamily: "inherit" }}>
+              {m.manual ? "🔗 " : ""}{m.event.name} · {m.qty}張 →
+            </button>
+          ))}
+        </div>
+      )}
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+        {isPending && <button style={btn("#e8f0e4", "#4a7a3a")} onClick={() => patch(r.id, { status: "approved" })}>✓ 核准</button>}
+        {isPending && <button style={btn("#fdeaea", "#b03a3a")} onClick={() => patch(r.id, { status: "rejected" })}>✕ 略過</button>}
+        <button style={btn("#fff", "#8b7355")} onClick={() => setLinkingId(linkingId === r.id ? null : r.id)}>🔗 連結場次</button>
+        {r.url && <a href={r.url} target="_blank" rel="noreferrer" style={{ ...btn("#fff", "#8b7355"), textDecoration: "none" }}>來源</a>}
+        <button style={btn("#fff", "#b03a3a")} onClick={() => remove(r)}>刪除</button>
+      </div>
+      {linkingId === r.id && (
+        <div style={{ borderTop: "1px dashed #e0dcd2", paddingTop: 8, display: "flex", flexDirection: "column", gap: 4, maxHeight: 220, overflowY: "auto" }}>
+          <div style={{ fontSize: 11, color: "#8a8272" }}>勾選=算進此演出;取消自動比對錯的也是這裡</div>
+          {events.filter(e => e.status !== "done" || r.matches.some(m => m.event.id === e.id)).map(e => {
+            const on = r.matches.some(m => m.event.id === e.id);
+            return (
+              <label key={e.id} style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 12, cursor: "pointer" }}>
+                <input type="checkbox" checked={on} onChange={() => {
+                  const linked = new Set(r.linked_event_ids || []); const excl = new Set(r.excluded_event_ids || []);
+                  if (on) { linked.delete(e.id); excl.add(e.id); } else { excl.delete(e.id); linked.add(e.id); }
+                  patch(r.id, { linked_event_ids: [...linked], excluded_event_ids: [...excl] });
+                }} />
+                {e.name}
+              </label>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+        <input value={q} onChange={e => setQ(e.target.value)} placeholder="🔍 搜尋演出 / 場地" style={{ ...inp, flex: 1, minWidth: 160 }} />
+        <label style={{ fontSize: 12, display: "flex", gap: 4, alignItems: "center", cursor: "pointer" }}><input type="checkbox" checked={onlyMine} onChange={e => setOnlyMine(e.target.checked)} />只看我有訂的</label>
+        <label style={{ fontSize: 12, display: "flex", gap: 4, alignItems: "center", cursor: "pointer" }}><input type="checkbox" checked={showPast} onChange={e => setShowPast(e.target.checked)} />含已過期</label>
+        <button style={btn("#8b7355", "#fff")} onClick={() => setAdding(a => !a)}>＋ 手動新增</button>
+        <button style={btn("#fff", "#8b7355")} onClick={load}>↻ 重新整理</button>
+      </div>
+      {adding && (
+        <div style={{ background: "#faf9f6", border: "1px solid #e0dcd2", borderRadius: 12, padding: 12, display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))", gap: 8 }}>
+          <input style={inp} placeholder="演出名稱 *" value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} />
+          <input style={inp} type="date" value={form.event_date} onChange={e => setForm({ ...form, event_date: e.target.value })} />
+          <input style={inp} placeholder="場地 (例:台北小巨蛋)" value={form.venue} onChange={e => setForm({ ...form, venue: e.target.value })} />
+          <input style={inp} placeholder="連結 (選填)" value={form.url} onChange={e => setForm({ ...form, url: e.target.value })} />
+          <input style={{ ...inp, gridColumn: "1 / -1" }} placeholder="別名 (選填,逗號分隔,例:BTS, 防彈)" value={form.aliases} onChange={e => setForm({ ...form, aliases: e.target.value })} />
+          <button style={btn("#8b7355", "#fff")} onClick={submitAdd}>儲存</button>
+        </div>
+      )}
+      {loading && <div style={{ color: "#8a8272", fontSize: 13 }}>載入中…</div>}
+      {err && (
+        <div style={{ background: "#fdf3e0", border: "1px solid #e0c070", borderRadius: 10, padding: 12, fontSize: 12, color: "#7a5a10", lineHeight: 1.7 }}>
+          ⚠️ {err}<br />若是第一次使用,請先到 Supabase 的 SQL Editor 執行建立 taiwan_concerts 資料表的 SQL。
+        </div>
+      )}
+      {!loading && !err && (
+        <div style={{ fontSize: 12, color: "#8a8272" }}>共 {approved.length} 場 · 我有訂的合計 <b style={{ color: "#8b7355" }}>{myTotal}</b> 張{pending.length > 0 ? ` · 待審 ${pending.length} 場` : ""}</div>
+      )}
+      {pending.length > 0 && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          <div style={{ fontWeight: 800, fontSize: 13, color: "#a07a10" }}>🟡 待審 ({pending.length})</div>
+          {pending.map(r => <Card key={r.id} r={r} isPending />)}
+        </div>
+      )}
+      {Object.keys(byMonth).sort().map(m => (
+        <div key={m} style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          <div style={{ fontWeight: 800, fontSize: 13, color: "#5a5046", borderBottom: "2px solid #e0dcd2", paddingBottom: 3 }}>{m.replace("-", " 年 ")} 月</div>
+          {byMonth[m].map(r => <Card key={r.id} r={r} />)}
+        </div>
+      ))}
+      {!loading && !err && approved.length === 0 && pending.length === 0 && <div style={{ color: "#a09888", fontSize: 13, textAlign: "center", padding: 30 }}>沒有符合的演出,可用「＋ 手動新增」,或等自動爬取上線</div>}
+    </div>
+  );
+}
+
 function MainApp() {
   const [events, setEvents] = useState(() => { try { const s = window.localStorage?.getItem?.("tkm-v3"); if (s) return JSON.parse(s); } catch {} return INITIAL_EVENTS; });
   const [buyerNames, setBuyerNames] = useState(() => { try { const s = window.localStorage?.getItem?.("tkm-v3-names"); if (s) return JSON.parse(s); } catch {} return KNOWN_BUYERS; });
@@ -2072,6 +2318,23 @@ function MainApp() {
     setExpandedBuyers(prev => {
       const next = new Set(prev);
       (evt.buyers || []).forEach(b => next.add(`${eventId}:${b.name}`));
+      return next;
+    });
+  };
+  // 按訂購時間排序的場次 (per-event toggle,存 localStorage)
+  const [sortByTimeEvents, setSortByTimeEvents] = useState(() => {
+    try {
+      const saved = localStorage.getItem("sortByTimeEvents");
+      return new Set(saved ? JSON.parse(saved) : []);
+    } catch { return new Set(); }
+  });
+  useEffect(() => {
+    try { localStorage.setItem("sortByTimeEvents", JSON.stringify([...sortByTimeEvents])); } catch {}
+  }, [sortByTimeEvents]);
+  const toggleSortByTime = (eventId) => {
+    setSortByTimeEvents(prev => {
+      const next = new Set(prev);
+      if (next.has(eventId)) next.delete(eventId); else next.add(eventId);
       return next;
     });
   };
@@ -3131,10 +3394,12 @@ function MainApp() {
     return () => clearInterval(timer);
   }, [events, buyerNames, logs, confirmModal, editingPrice, editingName, editingDetail, addingBatch, editingBatch, inputModal, identityExportModal, editingCatalogKey, buyerExportModal, dataDiffModal, importIdentityModal, realnameLinkModal]);
 
-  const activeEvents = events.filter(e => e.status === "active");
+  const activeEventsAll = events.filter(e => e.status === "active");
+  const emptyEvents = activeEventsAll.filter(e => (e.buyers || []).length === 0);
+  const activeEvents = activeEventsAll.filter(e => (e.buyers || []).length > 0);
   const pickedEvents = events.filter(e => e.status === "picked");
   const doneEvents = events.filter(e => e.status === "done");
-  const displayEvents = tab === "active" ? activeEvents : tab === "picked" ? pickedEvents : doneEvents;
+  const displayEvents = tab === "active" ? activeEvents : tab === "empty" ? emptyEvents : tab === "picked" ? pickedEvents : doneEvents;
   const filtered = displayEvents.filter(e => { if (!search) return true; const s = search.toLowerCase(); return e.name.toLowerCase().includes(s) || e.buyers?.some(b => b.name.toLowerCase().includes(s)); });
   const totalTickets = activeEvents.reduce((s, e) => s + (e.buyers || []).reduce((a, b) => a + buyerTotalQty(b), 0), 0);
   // 全域總覽(包含已取票、已完成,跟每日快照比較用)
@@ -3589,7 +3854,7 @@ function MainApp() {
           e.buyers.push({
             name: buyerName,
             qty: totalQ,
-            batches: [{ qty: totalQ, st: "normal", detail: "" }],
+            batches: [{ qty: totalQ, st: "normal", detail: "", addedAt: Date.now() }],
             identities: [],
             addedAt: Date.now(),
           });
@@ -3740,7 +4005,11 @@ function MainApp() {
       if (updates.qty !== undefined && updates.qty !== cur.qty) parts.push(`張數 ${cur.qty}→${updates.qty}`);
       if (updates.st !== undefined && updates.st !== cur.st) parts.push(`狀態→${BUYER_STATUS[updates.st]?.label || updates.st}`);
       if (updates.detail !== undefined && updates.detail !== (cur.detail||"")) parts.push("明細更新");
-      if (parts.length > 0) addLog(`【${evt.name}】${b.name} 分批：${parts.join("、")}`, snap());
+      if (updates.addedAt !== undefined && updates.addedAt !== cur.addedAt) {
+        const fmt = (t) => t ? new Date(t).toLocaleDateString("zh-TW") : "無";
+        parts.push(`訂購日期 ${fmt(cur.addedAt)}→${fmt(updates.addedAt)}`);
+      }
+      if (parts.length > 0) addLog(`【${evt.name}】${b.name} 分批:${parts.join("、")}`, snap());
     }
     updateEvent(eventId, e => {
       const nb = migrateBuyer(e.buyers[idx]);
@@ -3755,7 +4024,8 @@ function MainApp() {
     if (b) addLog(`【${evt.name}】${b.name}:新增分批 ${batch.qty}張 ${BUYER_STATUS[batch.st]?.label||batch.st}`, snap());
     updateEvent(eventId, e => {
       const nb = migrateBuyer(e.buyers[idx]);
-      nb.batches = [...nb.batches, { qty: batch.qty, st: batch.st, detail: batch.detail || "", addedAt: Date.now() }];
+      // 使用者輸入的 addedAt 優先,沒指定才用 Date.now()
+      nb.batches = [...nb.batches, { qty: batch.qty, st: batch.st, detail: batch.detail || "", addedAt: batch.addedAt || Date.now() }];
       nb.qty = nb.batches.reduce((s, x) => s + x.qty, 0);
       e.buyers[idx] = nb; return e;
     });
@@ -4198,8 +4468,7 @@ function MainApp() {
           </div>
           <div style={{ display:"flex",gap:4,flexWrap:"wrap",alignItems:"center" }}>
             {(() => {
-              const pendingTotal = events.filter(e=>e.status==="active"||e.status==="picked").reduce((s,e)=>s+countPendingFlag(e.buyers,"needRealName","gotRealName")+countPendingFlag(e.buyers,"needSid","gotSid")+countPendingFlag(e.buyers,"ticketDelivered","photoReceived"),0);
-              return [{key:"active",label:`進行中 (${activeEvents.length})`},{key:"picked",label:`已取票 (${pickedEvents.length})`},{key:"done",label:`已完成 (${doneEvents.length})`},{key:"pending",label:`📋 待收${pendingTotal>0?` (${pendingTotal})`:""}`},{key:"buyers",label:`👤 訂購人 (${buyersAggregated.length})`},{key:"identity",label:`📇 實名簿 (${identityCatalog.length})`},{key:"orderlog",label:`📅 訂購日曆`},{key:"timeline",label:`🕒 時間軸`}].map(t=>(
+              return [{key:"active",label:`進行中 (${activeEvents.length})`},{key:"empty",label:`📭 有開單但沒人訂${emptyEvents.length>0?` (${emptyEvents.length})`:""}`},{key:"picked",label:`已取票 (${pickedEvents.length})`},{key:"done",label:`已完成 (${doneEvents.length})`},{key:"buyers",label:`👤 訂購人 (${buyersAggregated.length})`},{key:"identity",label:`📇 實名簿 (${identityCatalog.length})`},{key:"orderlog",label:`📅 訂購日曆`},{key:"timeline",label:`🕒 時間軸`},{key:"concerts",label:`🎵 演唱會日曆`}].map(t=>(
               <button key={t.key} onClick={()=>{setTab(t.key);setSearch("");setExpandedId(null);setShowLog(false);}} style={{ padding:"7px 16px",borderRadius:8,border:"none",fontSize:13,fontWeight:700,cursor:"pointer",fontFamily:"inherit",background:tab===t.key&&!showLog?"#8b7355":"transparent",color:tab===t.key&&!showLog?"#fff":"#a09888" }}>{t.label}</button>
               ));
             })()}
@@ -4259,7 +4528,7 @@ function MainApp() {
         {!showLog&&(
           <div style={{ display:"flex",gap:8,marginBottom:16,flexWrap:"wrap" }}>
             <input placeholder="搜尋場次或訂購人..." value={search} onChange={e=>setSearch(e.target.value)} style={{ flex:1,minWidth:160,padding:"10px 14px",borderRadius:10,border:"1.5px solid #d4d0c8",fontSize:14,background:"#faf9f6",fontFamily:"inherit" }}/>
-            <button onClick={()=>setShowAddEvent(true)} style={{ padding:"10px 16px",borderRadius:10,border:"none",background:"#2d2a26",color:"#faf9f6",fontSize:14,fontWeight:700,cursor:"pointer",fontFamily:"inherit",whiteSpace:"nowrap",display:["active","picked","done"].includes(tab)?"inline-block":"none" }}>＋ 新增場次</button>
+            <button onClick={()=>setShowAddEvent(true)} style={{ padding:"10px 16px",borderRadius:10,border:"none",background:"#2d2a26",color:"#faf9f6",fontSize:14,fontWeight:700,cursor:"pointer",fontFamily:"inherit",whiteSpace:"nowrap",display:["active","empty","picked","done"].includes(tab)?"inline-block":"none" }}>＋ 新增場次</button>
             <button onClick={exportCSV} style={{ padding:"10px 12px",borderRadius:10,border:"1.5px solid #d4d0c8",background:"#fff",fontSize:12,cursor:"pointer",fontWeight:600,color:"#666",fontFamily:"inherit" }}>匯出CSV</button>
             {tab==="active"&&<button onClick={exportImage} title="把進行中場次存成一張圖，可傳到 LINE 隨時查看" style={{ padding:"10px 12px",borderRadius:10,border:"1.5px solid #d8c4a8",background:"#faf3e8",fontSize:12,cursor:"pointer",fontWeight:700,color:"#8b6a2d",fontFamily:"inherit" }}>🖼️ 匯出圖片</button>}
             {tab==="buyers"&&(()=>{
@@ -4419,8 +4688,8 @@ function MainApp() {
         })()}
 
         {/* Event cards */}
-        {!showLog&&["active","picked","done"].includes(tab)&&(<div style={{ display:"flex",flexDirection:"column",gap:10 }}>
-          {filtered.length===0&&<div style={{ textAlign:"center",padding:40,color:"#999" }}>{search?"找不到結果":"目前沒有場次"}</div>}
+        {!showLog&&["active","empty","picked","done"].includes(tab)&&(<div style={{ display:"flex",flexDirection:"column",gap:10 }}>
+          {filtered.length===0&&<div style={{ textAlign:"center",padding:40,color:"#999" }}>{search?"找不到結果":tab==="empty"?"目前沒有開單但沒人訂的場次":"目前沒有場次"}</div>}
           {filtered.map(evt=>{
             const isExp=expandedId===evt.id, buyerTotal=(evt.buyers||[]).reduce((s,b)=>s+buyerTotalQty(b),0);
             const hasUnpaid=(evt.buyers||[]).some(b=>buyerHasStatus(b,"unpaid")), hasRefund=(evt.buyers||[]).some(b=>buyerHasStatus(b,"refund"));
@@ -4484,21 +4753,42 @@ function MainApp() {
 
               {/* Expanded */}
               {isExp&&(<div style={{ padding:"0 18px 16px",borderTop:"1px solid #f0ede8" }}>
-                {(evt.buyers||[]).length >= 3 && (() => {
+                {(evt.buyers||[]).length >= 2 && (() => {
                   const allCollapsed = (evt.buyers||[]).every(b => !expandedBuyers.has(`${evt.id}:${b.name}`));
+                  const isSortedByTime = sortByTimeEvents.has(evt.id);
                   return (
-                    <div style={{ marginTop:10,display:"flex",justifyContent:"flex-end",alignItems:"center",gap:6 }}>
+                    <div style={{ marginTop:10,display:"flex",justifyContent:"flex-end",alignItems:"center",gap:6,flexWrap:"wrap" }}>
                       <span style={{ fontSize:10,color:"#a09080" }}>{(evt.buyers||[]).length} 位訂購人</span>
-                      <button onClick={()=>allCollapsed ? expandAllBuyers(evt.id) : collapseAllBuyers(evt.id)}
-                        title={allCollapsed ? "展開所有訂購人卡片" : "收合所有訂購人卡片(只看標頭,方便快速找人)"}
-                        style={{ padding:"3px 10px",borderRadius:6,border:"1px solid #d4d0c8",background:"#fff",cursor:"pointer",fontSize:11,fontWeight:600,color:"#8b7355",fontFamily:"inherit" }}>
-                        {allCollapsed ? "▸ 全部展開" : "▾ 全部收合"}
+                      <button onClick={()=>toggleSortByTime(evt.id)}
+                        title={isSortedByTime ? "✓ 已按時間排序 — 最早訂購的在最上面。點此關掉,回到手動順序" : "按訂購時間排序 (最早的在最上面,方便給優先票)"}
+                        style={{ padding:"3px 10px",borderRadius:6,border:`1px solid ${isSortedByTime?"#8b6a2d":"#d4d0c8"}`,background:isSortedByTime?"#faf3e8":"#fff",cursor:"pointer",fontSize:11,fontWeight:600,color:isSortedByTime?"#8b6a2d":"#8b7355",fontFamily:"inherit" }}>
+                        {isSortedByTime ? "✓ 已按時間排序" : "🕒 按時間排序"}
                       </button>
+                      {(evt.buyers||[]).length >= 3 && (
+                        <button onClick={()=>allCollapsed ? expandAllBuyers(evt.id) : collapseAllBuyers(evt.id)}
+                          title={allCollapsed ? "展開所有訂購人卡片" : "收合所有訂購人卡片(只看標頭,方便快速找人)"}
+                          style={{ padding:"3px 10px",borderRadius:6,border:"1px solid #d4d0c8",background:"#fff",cursor:"pointer",fontSize:11,fontWeight:600,color:"#8b7355",fontFamily:"inherit" }}>
+                          {allCollapsed ? "▸ 全部展開" : "▾ 全部收合"}
+                        </button>
+                      )}
                     </div>
                   );
                 })()}
                 <div style={{ marginTop:12,display:"flex",flexDirection:"column",gap:8 }}>
-                  {(evt.buyers||[]).map((b,i)=>{
+                  {(() => {
+                    const raw = (evt.buyers||[]).map((b,origIdx)=>({b,origIdx}));
+                    if (sortByTimeEvents.has(evt.id)) {
+                      // 按 addedAt asc (最早在最上);沒 addedAt 的排最後
+                      raw.sort((a,b)=>{
+                        const at = a.b.addedAt || Infinity;
+                        const bt = b.b.addedAt || Infinity;
+                        if (at !== bt) return at - bt;
+                        return a.origIdx - b.origIdx;
+                      });
+                    }
+                    return raw;
+                  })().map(({b,origIdx})=>{
+                    const i = origIdx;
                     const batches = getBatches(b);
                     const totalQ = batches.reduce((s,x)=>s+x.qty,0);
                     const primarySt = buyerPrimaryStatus(b);
@@ -4525,6 +4815,32 @@ function MainApp() {
                           onBlur={e=>{e.target.style.background="transparent";e.target.style.border="1px solid transparent";}}
                         />
                         <span style={{ fontSize:13,fontWeight:700,color:"#555" }}>共 {totalQ} 張</span>
+                        {b.addedAt && (() => {
+                          const first = new Date(b.addedAt);
+                          const now = new Date();
+                          const fmt = (d) => {
+                            const sy = d.getFullYear() === now.getFullYear();
+                            return sy ? `${d.getMonth()+1}/${d.getDate()}` : `${d.getFullYear().toString().slice(-2)}/${d.getMonth()+1}/${d.getDate()}`;
+                          };
+                          const fmtFull = (d) => d.toLocaleString("zh-TW",{year:"numeric",month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit"});
+                          // 找所有追加 batches (晚於首批 12hr 以上)
+                          const supplementary = batches
+                            .filter(bt => bt.addedAt && (bt.addedAt - b.addedAt) > 12*3600*1000)
+                            .sort((a,c) => a.addedAt - c.addedAt);
+                          const supCount = supplementary.length;
+                          const supQty = supplementary.reduce((s,bt)=>s+(bt.qty||0),0);
+                          // Tooltip:列出所有 batches 時間軸
+                          const timeline = [`首批: ${fmtFull(first)}`];
+                          supplementary.forEach((bt, idx) => {
+                            timeline.push(`追加 ${idx+1}: ${fmtFull(new Date(bt.addedAt))}  · ${bt.qty}張 ${BUYER_STATUS[bt.st]?.label || bt.st}${bt.detail?` (${bt.detail})`:""}`);
+                          });
+                          return (
+                            <span title={timeline.join("\n")}
+                              style={{ fontSize:10,fontWeight:600,padding:"2px 7px",borderRadius:10,background:supCount>0?"#fff4e0":"#f0ede4",color:supCount>0?"#a86a30":"#8b7355",whiteSpace:"nowrap",border:supCount>0?"1px solid #d8b088":"none" }}>
+                              🕒 {supCount>0 ? `首批 ${fmt(first)} · +${supCount} 追加 (${supQty} 張)` : fmt(first)}
+                            </span>
+                          );
+                        })()}
                         {(() => {
                           // 上游分流:依 batch.detail 抓「X供」分組
                           const supTotals = {};
@@ -4900,10 +5216,12 @@ function MainApp() {
                           const sc = BUYER_STATUS[bt.st] || BUYER_STATUS.normal;
                           const isEditing = editingBatch && editingBatch.eventId===evt.id && editingBatch.idx===i && editingBatch.bi===bi;
                           if (isEditing) {
-                            return (<BatchEditor key={bi} initialQty={bt.qty} initialSt={bt.st} initialDetail={bt.detail||""} maxQty={totalQ}
+                            return (<BatchEditor key={bi} initialQty={bt.qty} initialSt={bt.st} initialDetail={bt.detail||""} initialAddedAt={bt.addedAt} maxQty={totalQ}
                               onSave={(v)=>{updateBatch(evt.id,i,bi,v);setEditingBatch(null);}}
                               onCancel={()=>setEditingBatch(null)}/>);
                           }
+                          // 追加判定:batch.addedAt 比 buyer.addedAt 晚超過 12 小時 → 視為追加
+                          const isSupplementary = bt.addedAt && b.addedAt && (bt.addedAt - b.addedAt) > 12*3600*1000;
                           return (<div key={bi} style={{ padding:"6px 10px",borderRadius:8,background:"rgba(255,255,255,.7)",display:"flex",alignItems:"center",gap:8,flexWrap:"wrap",fontSize:13 }}>
                             <div style={{ display:"flex",alignItems:"center",gap:4 }}>
                               <button className="qty-btn" style={{ width:22,height:22,fontSize:13 }} onClick={()=>bt.qty>1&&updateBatch(evt.id,i,bi,{qty:bt.qty-1})}>−</button>
@@ -4913,6 +5231,18 @@ function MainApp() {
                             </div>
                             <span style={{ fontSize:11,fontWeight:700,padding:"2px 8px",borderRadius:10,background:sc.bg,color:sc.color,border:`1px solid ${sc.color}` }}>{sc.icon} {sc.label}</span>
                             {bt.detail && <span style={{ fontSize:12,color:sc.color }}>{bt.st==="picked"?"🎫":bt.st==="refund"?"↩":bt.st==="refunded"?"✅":""} {bt.detail}</span>}
+                            {bt.addedAt && (() => {
+                              const d = new Date(bt.addedAt);
+                              const now = new Date();
+                              const sy = d.getFullYear() === now.getFullYear();
+                              const ds = sy ? `${d.getMonth()+1}/${d.getDate()}` : `${d.getFullYear().toString().slice(-2)}/${d.getMonth()+1}/${d.getDate()}`;
+                              return (
+                                <span title={`此分批新增時間: ${d.toLocaleString("zh-TW",{year:"numeric",month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit"})}${isSupplementary?" (晚於首批,視為追加)":""}`}
+                                  style={{ fontSize:10,fontWeight:600,padding:"2px 7px",borderRadius:10,background:isSupplementary?"#fff4e0":"#f0ede4",color:isSupplementary?"#a86a30":"#8b7355",whiteSpace:"nowrap",border:isSupplementary?"1px solid #d8b088":"none" }}>
+                                  🕒 {ds}{isSupplementary ? " 追加" : ""}
+                                </span>
+                              );
+                            })()}
                             <button onClick={()=>{setEditingBatch({eventId:evt.id,idx:i,bi});setAddingBatch(null);}} style={{ marginLeft:"auto",padding:"3px 10px",borderRadius:6,border:"1px solid #d4d0c8",background:"#fff",cursor:"pointer",fontSize:11,fontWeight:600,color:"#8b7355",fontFamily:"inherit" }}>編輯</button>
                             {batches.length>1&&<button onClick={()=>removeBatch(evt.id,i,bi)} style={{ width:22,height:22,borderRadius:5,border:"1px solid #e8c4c4",background:"#fff",cursor:"pointer",fontSize:11,color:"#c47070",fontFamily:"inherit" }} title="移除此分批">×</button>}
                           </div>);
@@ -5002,46 +5332,7 @@ function MainApp() {
 
         {/* Pending (待收) view */}
         {!showLog&&tab==="pending"&&(<div style={{ display:"flex",flexDirection:"column",gap:14 }}>
-          {(() => {
-            const activeOnly = events.filter(e => e.status === "active" || e.status === "picked");
-            const realNameItems = []; const sidItems = []; const photoItems = [];
-            activeOnly.forEach(evt => {
-              (evt.buyers || []).forEach((b, bi) => {
-                if (b.needRealName && !b.gotRealName) realNameItems.push({ evt, b, bi });
-                if (b.needSid && !b.gotSid) sidItems.push({ evt, b, bi });
-                if (b.ticketDelivered && !b.photoReceived) photoItems.push({ evt, b, bi });
-              });
-            });
-            const renderSection = (title, icon, color, bg, items, gotFlag) => (
-              <div style={{ background:"#fff",borderRadius:14,border:"1px solid #e4e0d8",overflow:"hidden",borderLeft:`4px solid ${color}` }}>
-                <div style={{ padding:"12px 18px",background:bg,borderBottom:"1px solid #f0ede8",fontWeight:700,fontSize:15,color,display:"flex",alignItems:"baseline",gap:10 }}>
-                  <span>{icon} {title}</span>
-                  <span style={{ fontSize:12,fontWeight:500,color:"#999" }}>{items.length} 筆</span>
-                </div>
-                {items.length === 0 ? (
-                  <div style={{ padding:"20px",textAlign:"center",color:"#9b9588",fontSize:13 }}>沒有待收項目 🎉</div>
-                ) : (
-                  <div style={{ padding:"10px 14px",display:"flex",flexDirection:"column",gap:6 }}>
-                    {items.map(({evt,b,bi},i)=>(
-                      <div key={i} style={{ padding:"8px 12px",borderRadius:8,background:bg,display:"flex",alignItems:"center",gap:10,flexWrap:"wrap" }}>
-                        <span style={{ fontWeight:700,fontSize:13,color:"#2d2a26",minWidth:0 }}>{b.name}</span>
-                        <span style={{ fontSize:12,color:"#666" }}>· {evt.name}</span>
-                        <span style={{ fontSize:11,color:"#999" }}>共 {buyerTotalQty(b)} 張</span>
-                        <button onClick={()=>toggleBuyerFlag(evt.id,bi,gotFlag)} style={{ marginLeft:"auto",padding:"4px 12px",borderRadius:7,border:`1px solid ${color}`,background:"#fff",fontSize:11,cursor:"pointer",fontWeight:700,color,fontFamily:"inherit" }}>標記為已收 ✅</button>
-                        <button onClick={()=>jumpToEvent(evt.id,evt.status)} style={{ padding:"4px 10px",borderRadius:7,border:"1px solid #d4d0c8",background:"#fff",fontSize:11,cursor:"pointer",fontWeight:600,color:"#8b7355",fontFamily:"inherit" }}>前往</button>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            );
-            return (<>
-              {renderSection("待收實名資料","📝","#a86a30","#fff3e0",realNameItems,"gotRealName")}
-              {renderSection("待收 SID 碼","🎟","#7a5a8b","#f3edf8",sidItems,"gotSid")}
-              {renderSection("待回傳照片","📸","#3a7a8b","#e0f0f6",photoItems,"photoReceived")}
-              <div style={{ textAlign:"center",fontSize:11,color:"#a09888",padding:"6px 0" }}>* 統計範圍：進行中 + 已取票場次</div>
-            </>);
-          })()}
+          {/* 待收 tab 已移除 — 保留 tab key 相容性,但不再顯示內容 */}
         </div>)}
 
         {/* Buyers (訂購人) view */}
@@ -5379,6 +5670,8 @@ function MainApp() {
             })()}
           </>)}
         </div>)}
+
+        {!showLog&&tab==="concerts"&&(<ConcertCalendarTab events={events} jumpToEvent={jumpToEvent} />)}
 
         {/* Timeline (時間軸) view */}
         {!showLog&&tab==="timeline"&&(<div style={{ display:"flex",flexDirection:"column",gap:12 }}>
