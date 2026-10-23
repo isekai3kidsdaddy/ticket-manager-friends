@@ -2098,6 +2098,64 @@ function ConcertCalendarTab({ events, jumpToEvent }) {
   const [adding, setAdding] = useState(false);
   const [form, setForm] = useState({ name: "", event_date: "", venue: "", url: "", aliases: "" });
   const [linkingId, setLinkingId] = useState(null);
+  const [urlOpen, setUrlOpen] = useState(false);
+  const [urlInput, setUrlInput] = useState("");
+  const [pasteText, setPasteText] = useState("");
+  const [parsing, setParsing] = useState(false);
+  const [urlErr, setUrlErr] = useState("");
+  const [draft, setDraft] = useState(null); // {name, venue, datesText, aliases, url, confidence, notes}
+
+  const parseUrl = async () => {
+    if (!urlInput.trim() && !pasteText.trim()) { setUrlErr("請貼上網址或頁面文字"); return; }
+    // 網址欄貼的不是網址(例如整頁文字)→ 自動當頁面文字處理
+    const u0 = urlInput.trim();
+    const isUrl = /^https?:\/\/\S+$/i.test(u0);
+    const textBody = pasteText.trim() || (!isUrl && u0.length > 20 ? u0 : "");
+    const bodyObj = textBody ? { text: textBody } : { url: u0 };
+    if (!textBody && !isUrl) { setUrlErr("網址格式不對,請貼 https:// 開頭的網址,或展開下方貼頁面文字"); return; }
+    setParsing(true); setUrlErr(""); setDraft(null);
+    try {
+      const r = await fetch("/api/parse-concert", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(bodyObj) });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) { setUrlErr(j.error || `解析失敗 (${r.status})`); }
+      else if (!j.events || j.events.length === 0) { setUrlErr("沒有在內容中找到未來的演出日期,可能不是演出頁面,或請改貼頁面文字"); }
+      else setDraft(j.events.map(ev => ({ on: true, name: ev.name || "", venue: ev.venue || "", datesText: (ev.dates || []).join(", "), aliases: (ev.aliases || []).join(", "), url: textBody ? "" : (j.url || u0), confidence: ev.confidence ?? 0.8, notes: ev.notes || "" })));
+    } catch (e) { setUrlErr("無法連線到解析服務:" + e.message); }
+    setParsing(false);
+  };
+  // 重複偵測:日期有重疊 + 名稱相似(含別名、城市檢查)
+  const findDup = (d) => {
+    const dates = d.datesText.split(/[\s,，、]+/).map(x => x.trim()).filter(x => /^\d{4}-\d{2}-\d{2}$/.test(x));
+    if (!d.name.trim() || dates.length === 0) return null;
+    const hits = rows.filter(r => dates.includes(String(r.event_date)) && (
+      concertNameScore([r.name, ...(r.aliases || [])], d.name, concertCities(r.name)) >= 0.6 ||
+      concertNameScore([d.name, ...d.aliases.split(/[,，、]/).map(x => x.trim()).filter(Boolean)], r.name, concertCities(d.name)) >= 0.6
+    ));
+    if (hits.length === 0) return null;
+    return { hits, overlap: [...new Set(hits.map(h => String(h.event_date)))], name: hits[0].name };
+  };
+  const saveDraft = async () => {
+    const recs = [];
+    const delIds = [];
+    for (const d of draft.filter(x => x.on)) {
+      const dates = d.datesText.split(/[\s,，、]+/).map(x => x.trim()).filter(x => /^\d{4}-\d{2}-\d{2}$/.test(x));
+      if (!d.name.trim() || dates.length === 0) { alert(`「${d.name || "(未命名)"}」缺名稱或日期 (YYYY-MM-DD),請修正或取消勾選`); return; }
+      const dup = findDup(d);
+      const act = dup ? (d.action || "skip") : "add";
+      if (dup && act === "replace") dup.hits.forEach(h => delIds.push(h.id));
+      const useDates = dup && act === "skip" ? dates.filter(dt => !dup.overlap.includes(dt)) : dates;
+      useDates.forEach(dt => recs.push({ name: d.name.trim(), event_date: dt, venue: d.venue.trim() || null, url: d.url || null, aliases: d.aliases.split(/[,，、]/).map(x => x.trim()).filter(Boolean), source: "url", confidence: d.confidence, status: "approved" }));
+    }
+    if (recs.length === 0) { alert("沒有要新增的演出(勾選的都因重複而略過了)"); return; }
+    if (delIds.length) {
+      const { error: de } = await supabase.from("taiwan_concerts").delete().in("id", delIds);
+      if (de) { alert("取代舊資料失敗:" + de.message); return; }
+    }
+    const { error } = await supabase.from("taiwan_concerts").upsert(recs, { onConflict: "name,event_date", ignoreDuplicates: true });
+    if (error) { alert("新增失敗:" + error.message); return; }
+    setDraft(null); setUrlInput(""); setPasteText(""); setUrlOpen(false); setUrlErr("");
+    load();
+  };
 
   const load = async () => {
     if (!SUPABASE_READY) { setLoading(false); setErr("尚未設定雲端 (Supabase),無法使用演唱會日曆"); return; }
@@ -2228,9 +2286,57 @@ function ConcertCalendarTab({ events, jumpToEvent }) {
         <input value={q} onChange={e => setQ(e.target.value)} placeholder="🔍 搜尋演出 / 場地" style={{ ...inp, flex: 1, minWidth: 160 }} />
         <label style={{ fontSize: 12, display: "flex", gap: 4, alignItems: "center", cursor: "pointer" }}><input type="checkbox" checked={onlyMine} onChange={e => setOnlyMine(e.target.checked)} />只看我有訂的</label>
         <label style={{ fontSize: 12, display: "flex", gap: 4, alignItems: "center", cursor: "pointer" }}><input type="checkbox" checked={showPast} onChange={e => setShowPast(e.target.checked)} />含已過期</label>
-        <button style={btn("#8b7355", "#fff")} onClick={() => setAdding(a => !a)}>＋ 手動新增</button>
+        <button style={btn("#8b7355", "#fff")} onClick={() => { setUrlOpen(o => !o); setUrlErr(""); }}>🔗 貼網址新增</button>
+        <button style={btn("#fff", "#8b7355")} onClick={() => setAdding(a => !a)}>＋ 手動新增</button>
         <button style={btn("#fff", "#8b7355")} onClick={load}>↻ 重新整理</button>
       </div>
+      {urlOpen && (
+        <div style={{ background: "#faf9f6", border: "1px solid #e0dcd2", borderRadius: 12, padding: 12, display: "flex", flexDirection: "column", gap: 8 }}>
+          <div style={{ fontSize: 12, color: "#8a8272" }}>貼上演唱會頁面網址,或展開下方「改貼頁面文字」貼整頁列表(拓元活動列表、KKTIX、寬宏都可以,一次可抽出多場),AI 會抓出名稱、日期、場地,讓你確認後再存。</div>
+          <input style={inp} placeholder="https://..." value={urlInput} onChange={e => setUrlInput(e.target.value)} />
+          <details style={{ fontSize: 12, color: "#8a8272" }}>
+            <summary style={{ cursor: "pointer" }}>網址抓不到(例如拓元)?改貼頁面文字 / 整頁列表</summary>
+            <textarea style={{ ...inp, minHeight: 90, marginTop: 6 }} placeholder="在網頁上全選複製,貼在這裡(填了文字就會優先用文字)" value={pasteText} onChange={e => setPasteText(e.target.value)} />
+          </details>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button style={btn("#8b7355", "#fff")} onClick={parseUrl} disabled={parsing}>{parsing ? "解析中…請稍候" : "解析"}</button>
+            <button style={btn("#fff", "#8a8272")} onClick={() => { setUrlOpen(false); setDraft(null); setUrlErr(""); }}>取消</button>
+          </div>
+          {urlErr && <div style={{ fontSize: 12, color: "#b03a3a" }}>⚠️ {urlErr}</div>}
+          {draft && (
+            <div style={{ borderTop: "1px dashed #e0dcd2", paddingTop: 8, display: "flex", flexDirection: "column", gap: 8 }}>
+              <div style={{ fontSize: 12, color: "#4a7a3a", fontWeight: 700 }}>✅ 找到 {draft.length} 場,請確認(可修改、取消勾選),再儲存</div>
+              {draft.map((d, i) => {
+                const upd = (f) => setDraft(ds => ds.map((x, j) => j === i ? { ...x, ...f } : x));
+                return (
+                  <div key={i} style={{ background: "#fff", border: "1px solid #e0dcd2", borderRadius: 10, padding: 8, display: "grid", gridTemplateColumns: "auto repeat(auto-fit,minmax(150px,1fr))", gap: 6, alignItems: "center", opacity: d.on ? 1 : 0.5 }}>
+                    <input type="checkbox" checked={d.on} onChange={e => upd({ on: e.target.checked })} />
+                    <input style={inp} value={d.name} onChange={e => upd({ name: e.target.value })} placeholder="名稱" />
+                    <input style={inp} value={d.venue} onChange={e => upd({ venue: e.target.value })} placeholder="場地" />
+                    <input style={inp} value={d.datesText} onChange={e => upd({ datesText: e.target.value })} placeholder="日期 YYYY-MM-DD,逗號分隔" />
+                    {d.notes && <div style={{ gridColumn: "1 / -1", fontSize: 11, color: "#a07a10" }}>AI 備註:{d.notes}</div>}
+                    {(() => {
+                      const dup = findDup(d);
+                      if (!dup) return null;
+                      return (
+                        <div style={{ gridColumn: "1 / -1", background: "#fdf3e0", border: "1px solid #e0c070", borderRadius: 8, padding: "6px 10px", fontSize: 12, color: "#7a5a10", display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+                          ⚠️ 可能和日曆裡的「{dup.name}」({dup.overlap.map(x => x.slice(5).replace("-", "/")).join("、")}) 重複
+                          <select value={d.action || "skip"} onChange={e => upd({ action: e.target.value })} style={{ padding: "3px 6px", borderRadius: 6, border: "1px solid #d4d0c8", fontSize: 12, fontFamily: "inherit" }}>
+                            <option value="skip">略過重疊的日期(保留舊的)</option>
+                            <option value="replace">取代舊的</option>
+                            <option value="add">仍要新增(當作不同場)</option>
+                          </select>
+                        </div>
+                      );
+                    })()}
+                  </div>
+                );
+              })}
+              <button style={btn("#8b7355", "#fff")} onClick={saveDraft}>儲存勾選的 {draft.filter(x => x.on).length} 場到日曆</button>
+            </div>
+          )}
+        </div>
+      )}
       {adding && (
         <div style={{ background: "#faf9f6", border: "1px solid #e0dcd2", borderRadius: 12, padding: 12, display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))", gap: 8 }}>
           <input style={inp} placeholder="演出名稱 *" value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} />
